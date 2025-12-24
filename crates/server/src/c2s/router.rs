@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dashmap::DashMap;
 
 use narwhal_util::pool::PoolBuffer;
 use narwhal_util::string_atom::StringAtom;
 
+use crate::telemetry::metrics;
 use crate::transmitter::Transmitter;
 
 const DEFAULT_ROUTER_SHARD_COUNT: usize = 1024;
@@ -35,6 +37,9 @@ pub struct Router {
 
   /// The connections map.
   connections: Arc<DashMap<StringAtom, Vec<Entry>>>,
+
+  /// Total number of connected clients.
+  total_connections: Arc<AtomicUsize>,
 }
 
 // ===== impl Router =====
@@ -50,7 +55,12 @@ impl Router {
   ///
   /// A new `Router` instance with default capacity
   pub fn new(local_domain: StringAtom) -> Self {
-    Self::new_with_shard_count(local_domain, DEFAULT_ROUTER_SHARD_COUNT)
+    Self::with_shard_count(local_domain, DEFAULT_ROUTER_SHARD_COUNT)
+  }
+
+  /// Gets the total number of connected clients.
+  pub fn total_connections(&self) -> usize {
+    self.total_connections.load(Ordering::Relaxed)
   }
 
   /// Creates a new `Router` with a specified shard count.
@@ -63,8 +73,12 @@ impl Router {
   /// # Returns
   ///
   /// A new `Router` instance with the specified capacity
-  pub fn new_with_shard_count(local_domain: StringAtom, shard_count: usize) -> Self {
-    Self { local_domain, connections: Arc::new(DashMap::with_shard_amount(shard_count)) }
+  pub fn with_shard_count(local_domain: StringAtom, shard_count: usize) -> Self {
+    Router {
+      local_domain,
+      connections: Arc::new(DashMap::with_shard_amount(shard_count)),
+      total_connections: Arc::new(AtomicUsize::new(0)),
+    }
   }
 
   /// Routes a message to a single target.
@@ -125,6 +139,11 @@ impl Router {
     }
 
     entry.push(Entry::new(handler, transmitter));
+
+    // Update metrics
+    let count = self.total_connections.fetch_add(1, Ordering::Relaxed) + 1;
+    metrics::set_c2s_clients_connected(count as f64);
+
     true
   }
 
@@ -152,9 +171,18 @@ impl Router {
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<(), E>>,
   {
+    let mut connection_removed = false;
     self.connections.entry(username.clone()).and_modify(|entries| {
+      let old_len = entries.len();
       entries.retain(|entry| entry.handler != handler);
+      connection_removed = entries.len() < old_len;
     });
+
+    // Update metrics if a connection was removed
+    if connection_removed {
+      let count = self.total_connections.fetch_sub(1, Ordering::Relaxed) - 1;
+      metrics::set_c2s_clients_connected(count as f64);
+    }
 
     // Remove the entry if it's empty
     let was_removed = self.connections.remove_if(username, |_, entries| entries.is_empty());

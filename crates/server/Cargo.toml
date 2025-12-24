@@ -29,6 +29,8 @@ parking_lot = "0.12.5"
 rcgen = "0.14.0"
 rustls = "0.23.32"
 rustls-pemfile = "2.2.0"
+metrics = "0.24.3"
+metrics-exporter-prometheus = "0.18.1"
 narwhal-client = { path = "../client" }
 narwhal-common = { path = "../common" }
 narwhal-modulator = { path = "../modulator" }
