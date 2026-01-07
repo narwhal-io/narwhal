@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
+pub mod metrics;
+
 use std::io::stdout;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::anyhow;
 use console_subscriber::ConsoleLayer;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use serde::{Deserialize, Serialize};
 use tracing::metadata::LevelFilter;
 use tracing_subscriber::fmt;
@@ -16,9 +20,38 @@ pub struct Config {
   #[serde(default)]
   logging: LoggingConfig,
 
+  /// the configuration for metrics
+  #[serde(default)]
+  pub metrics: MetricsConfig,
+
   /// the configuration for the console
   #[serde(default)]
   console: ConsoleConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MetricsConfig {
+  /// whether metrics are enabled
+  #[serde(default = "default_metrics_enabled")]
+  pub enabled: bool,
+
+  /// the port to expose Prometheus metrics on
+  #[serde(default = "default_metrics_port")]
+  pub port: u16,
+}
+
+impl Default for MetricsConfig {
+  fn default() -> Self {
+    Self { enabled: default_metrics_enabled(), port: default_metrics_port() }
+  }
+}
+
+fn default_metrics_enabled() -> bool {
+  true
+}
+
+fn default_metrics_port() -> u16 {
+  9090
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -134,6 +167,10 @@ pub fn init(config: Config) -> anyhow::Result<()> {
     "text" => init_text_logger(level_filter, console_builder_opt),
     _ => return Err(anyhow!("invalid logging format: {}", config.logging.format)),
   };
+
+  // Initialize the metrics exporter
+  init_metrics(config.metrics)?;
+
   Ok(())
 }
 
@@ -190,4 +227,20 @@ fn init_text_logger(level_filter: LevelFilter, console_builder_opt: Option<conso
   } else {
     registry.init();
   }
+}
+
+fn init_metrics(config: MetricsConfig) -> anyhow::Result<()> {
+  if !config.enabled {
+    return Ok(());
+  }
+  // Create bind address from configured port
+  let bind_address: SocketAddr = format!("0.0.0.0:{}", config.port).parse()?;
+
+  // Install the Prometheus exporter
+  PrometheusBuilder::new().with_http_listener(bind_address).install()?;
+
+  // Describe all metrics
+  metrics::describe_metrics();
+
+  Ok(())
 }
