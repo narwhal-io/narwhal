@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 use core::fmt::Debug;
+use std::future::Future;
 use std::io::{Cursor, IoSlice};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::thread;
 use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use core_affinity::CoreId;
 use parking_lot::Mutex as PlMutex;
 use rand::random;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf};
@@ -356,7 +360,7 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
     Ok(())
   }
 
-  pub async fn run<T>(&self, mut stream: T) -> anyhow::Result<()>
+  pub async fn run<T>(&self, mut stream: T)
   where
     T: AsyncRead + AsyncWrite + Unpin,
   {
@@ -376,15 +380,15 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
 
     // If no connection is available, send an error message and return.
     if conn_ref_opt.is_none() {
-      stream.write_all(SERVER_OVERLOADED_ERROR).await?;
-      stream.flush().await?;
+      let _ = stream.write_all(SERVER_OVERLOADED_ERROR).await;
+      let _ = stream.flush().await;
 
-      stream.shutdown().await?;
+      let _ = stream.shutdown().await;
 
       let max_conns = conns.capacity().await;
       warn!(max_conns, service_type = ST::NAME, "max connections limit reached");
 
-      return Ok(());
+      return;
     }
     let conn_ref = conn_ref_opt.unwrap();
 
@@ -456,8 +460,6 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
       service_type = ST::NAME,
       "connection deregistered"
     );
-
-    Ok(())
   }
 }
 
@@ -1269,5 +1271,263 @@ impl ConnTx {
   pub fn close(&self, message: Message) {
     assert!(matches!(message, Message::Error { .. }), "a Message::Error message is expected");
     let _ = self.close_tx.try_send(message);
+  }
+}
+
+const CONN_QUEUE_SIZE: usize = 1024;
+
+/// A trait representing a connection stream that can be read from and written to.
+pub trait ConnStream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
+
+impl<T> ConnStream for T where T: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
+
+/// A type alias for an async function that provides a connection stream when invoked.
+pub type ConnProvider<S> =
+  Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = anyhow::Result<S>> + Send>> + Send + 'static>;
+
+/// A pool of connection workers that distributes streams across multiple workers.
+///
+/// The pool manages multiple `ConnWorker` instances, each bound to a different CPU core.
+/// When streams are submitted, they are automatically routed to the worker with the
+/// fewest active streams, providing automatic load balancing.
+///
+/// # Type Parameters
+///
+/// * `S` - The connection stream type (must implement `ConnStream`)
+/// * `D` - The dispatcher type for handling messages
+/// * `DF` - The dispatcher factory for creating dispatchers
+/// * `ST` - The service type being served
+pub struct ConnWorkerPool<S, D: Dispatcher, DF: DispatcherFactory<D>, ST: Service>
+where
+  S: ConnStream,
+{
+  /// The collection of workers in the pool.
+  workers: Arc<[ConnWorker<S, D, DF, ST>]>,
+}
+
+impl<S, D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> Clone for ConnWorkerPool<S, D, DF, ST>
+where
+  S: ConnStream,
+{
+  fn clone(&self) -> Self {
+    Self { workers: self.workers.clone() }
+  }
+}
+
+impl<S, D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnWorkerPool<S, D, DF, ST>
+where
+  S: ConnStream,
+{
+  /// Creates a new connection worker pool.
+  ///
+  /// Each worker is assigned to a different CPU core in a round-robin fashion based
+  /// on the available cores on the system. If `worker_count` exceeds the number of
+  /// available cores, workers will be assigned to cores cyclically.
+  ///
+  /// # Arguments
+  ///
+  /// * `worker_count` - The number of workers to create in the pool
+  /// * `conn_manager` - The connection manager to use for processing streams
+  ///
+  /// # Returns
+  ///
+  /// Returns a `ConnWorkerPool` instance or an error if worker creation fails.
+  pub fn new(worker_count: usize, conn_manager: ConnManager<D, DF, ST>) -> anyhow::Result<Self> {
+    // Get available CPU cores
+    let core_ids = core_affinity::get_core_ids().ok_or_else(|| anyhow::anyhow!("failed to get core IDs"))?;
+
+    if core_ids.is_empty() {
+      return Err(anyhow::anyhow!("no CPU cores available"));
+    }
+
+    // Create workers, assigning each to a core in round-robin fashion
+    let mut workers = Vec::with_capacity(worker_count);
+
+    for i in 0..worker_count {
+      let core_id = core_ids[i % core_ids.len()];
+      let worker = ConnWorker::new(conn_manager.clone(), core_id)?;
+      workers.push(worker);
+    }
+
+    Ok(ConnWorkerPool { workers: workers.into() })
+  }
+
+  /// Submits a new stream provider to be processed by a worker.
+  ///
+  /// This method performs automatic load balancing by finding the worker with the
+  /// lowest number of active streams and submitting the provided stream to that worker.
+  ///
+  /// If multiple workers have the same minimum load, the first one encountered is chosen.
+  ///
+  /// # Arguments
+  ///
+  /// * `stream_provider` - A function that provides the connection stream when invoked
+  pub async fn submit<F, Fut>(&self, stream_provider: F)
+  where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = anyhow::Result<S>> + Send + 'static,
+  {
+    if let Some(worker) = self.workers.iter().min_by_key(|w| w.active_streams()) {
+      worker.submit(stream_provider).await;
+    }
+  }
+
+  /// Returns the total number of active streams across all workers.
+  ///
+  /// # Returns
+  ///
+  /// The sum of active streams from all workers in the pool.
+  pub fn active_streams(&self) -> usize {
+    self.workers.iter().map(|w| w.active_streams()).sum()
+  }
+
+  /// Returns the number of workers in the pool.
+  ///
+  /// # Returns
+  ///
+  /// The number of workers as a `usize`.
+  pub fn worker_count(&self) -> usize {
+    self.workers.len()
+  }
+}
+
+/// A worker that processes connection streams on a dedicated thread.
+///
+/// # Type Parameters
+///
+/// * `S` - The connection stream type (must implement `ConnStream`)
+/// * `D` - The dispatcher type for handling messages
+/// * `DF` - The dispatcher factory for creating dispatchers
+/// * `ST` - The service type being served
+#[derive(Debug)]
+struct ConnWorker<S, D: Dispatcher, DF: DispatcherFactory<D>, ST: Service>
+where
+  S: ConnStream,
+{
+  /// Channel sender for submitting stream providers to the worker thread.
+  tx: Option<tokio::sync::mpsc::Sender<ConnProvider<S>>>,
+
+  /// Handle to the worker thread. Used to join the thread on shutdown.
+  handle: Option<thread::JoinHandle<()>>,
+
+  /// Atomic counter tracking the number of currently active stream tasks.
+  active_streams: Arc<AtomicUsize>,
+
+  /// Phantom data to maintain type parameters in the struct.
+  _phantom: std::marker::PhantomData<(D, DF, ST)>,
+}
+
+impl<S, D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnWorker<S, D, DF, ST>
+where
+  S: ConnStream,
+{
+  /// Creates a new connection worker bound to a specific CPU core.
+  ///
+  /// This spawns a new OS thread with the specified CPU affinity and creates a
+  /// single-threaded Tokio runtime on that thread. The worker will process streams
+  /// submitted via the `submit()` method.
+  ///
+  /// # Arguments
+  ///
+  /// * `conn_manager` - The connection manager to use for processing streams
+  /// * `affinity` - The CPU core ID to bind this worker thread to
+  ///
+  /// # Returns
+  ///
+  /// Returns a `ConnWorker` instance or an error if thread creation fails.
+  ///
+  /// # Example
+  ///
+  /// ```ignore
+  /// let worker = ConnWorker::new(conn_manager, CoreId { id: 0 })?;
+  /// ```
+  fn new(conn_manager: ConnManager<D, DF, ST>, affinity: CoreId) -> anyhow::Result<Self> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<ConnProvider<S>>(CONN_QUEUE_SIZE);
+
+    let active_streams = Arc::new(AtomicUsize::new(0));
+    let active_streams_clone = active_streams.clone();
+
+    let handle = thread::spawn(move || {
+      let _ = core_affinity::set_for_current(affinity);
+
+      Self::spawn_runtime(conn_manager, rx, active_streams_clone);
+    });
+
+    Ok(ConnWorker { tx: Some(tx), handle: Some(handle), active_streams, _phantom: std::marker::PhantomData })
+  }
+
+  /// Returns the current number of active stream tasks being processed.
+  ///
+  /// # Returns
+  ///
+  /// The number of active streams as a `usize`.
+  fn active_streams(&self) -> usize {
+    self.active_streams.load(Ordering::Relaxed)
+  }
+
+  /// Submits a new stream provider to be processed by the worker thread.
+  ///
+  /// If the worker has been stopped, the provider is silently ignored.
+  ///
+  /// # Arguments
+  ///
+  /// * `stream_provider` - A function that provides the connection stream when invoked
+  async fn submit<F, Fut>(&self, stream_provider: F)
+  where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = anyhow::Result<S>> + Send + 'static,
+  {
+    if let Some(tx) = &self.tx {
+      let _ = tx.send(Box::new(|| Box::pin(stream_provider()))).await;
+    }
+  }
+
+  /// Spawns a single-threaded async runtime associated to the worker thread.
+  fn spawn_runtime(
+    conn_manager: ConnManager<D, DF, ST>,
+    mut rx: tokio::sync::mpsc::Receiver<ConnProvider<S>>,
+    active_streams: Arc<AtomicUsize>,
+  ) {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+    rt.block_on(async move {
+      while let Some(stream_provider) = rx.recv().await {
+        let conn_manager = conn_manager.clone();
+        let active_streams = active_streams.clone();
+
+        tokio::task::spawn(async move {
+          let stream = match stream_provider().await {
+            Ok(s) => s,
+            Err(e) => {
+              warn!("connection provider failed: {}", e.to_string());
+              return;
+            },
+          };
+
+          active_streams.fetch_add(1, Ordering::Relaxed);
+
+          conn_manager.run(stream).await;
+
+          active_streams.fetch_sub(1, Ordering::Relaxed);
+        });
+      }
+    });
+  }
+}
+
+impl<S, D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> Drop for ConnWorker<S, D, DF, ST>
+where
+  S: ConnStream,
+{
+  fn drop(&mut self) {
+    // Drop the sender to signal the worker thread to stop
+    if let Some(tx) = self.tx.take() {
+      drop(tx);
+
+      // Wait for the worker thread to terminate
+      if let Some(handle) = self.handle.take() {
+        let _ = handle.join();
+      }
+    }
   }
 }

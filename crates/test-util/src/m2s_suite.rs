@@ -41,7 +41,7 @@ impl M2sSuite {
 
     let conn_mng = narwhal_modulator::conn::M2sConnManager::new(&server_config, dispatcher_factory);
 
-    let ln = M2sListener::new(server_config.listener.clone(), conn_mng.clone());
+    let ln = M2sListener::new(server_config.listener.clone(), conn_mng.clone(), 1);
 
     Self { config: arc_config, ln, payload_tx, payload_rx: Some(payload_rx) }
   }

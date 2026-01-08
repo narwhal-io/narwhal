@@ -151,7 +151,7 @@ where
 {
   let protocol_name = modulator.protocol_name().await?;
 
-  let mut ln = create_s2m_listener(config, modulator).await?;
+  let mut ln = create_s2m_listener(config, modulator, 1).await?;
 
   info!(protocol_name = protocol_name.as_ref(), "📡 starting s2m server...");
 

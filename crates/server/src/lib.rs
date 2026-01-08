@@ -78,6 +78,7 @@ pub async fn run(config_file: Option<String>, worker_threads: usize) -> anyhow::
     cfg.modulator.clone(),
     cfg.c2s_server.limits.max_message_size,
     cfg.c2s_server.limits.max_payload_size,
+    worker_threads,
   )
   .await?;
 
@@ -118,7 +119,7 @@ pub async fn run(config_file: Option<String>, worker_threads: usize) -> anyhow::
 
   let c2s_conn_mng = c2s::conn::C2sConnManager::new(c2s_config.as_ref(), c2s_dispatcher_factory);
 
-  let mut c2s_ln = c2s::C2sListener::new(c2s_config.listener.clone(), c2s_conn_mng);
+  let mut c2s_ln = c2s::C2sListener::new(c2s_config.listener.clone(), c2s_conn_mng, worker_threads);
 
   // Start routing task for modulator private payloads.
   let mut route_m2s_payload_handle = Option::<(JoinHandle<()>, CancellationToken)>::None;

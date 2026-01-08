@@ -156,6 +156,7 @@ pub async fn init_modulator(
   config: Config,
   c2s_max_message_size: u32,
   c2s_max_payload_size: u32,
+  worker_threads: usize,
 ) -> anyhow::Result<ModulatorService> {
   if config.r#type.is_empty() {
     return Ok(ModulatorService {
@@ -223,7 +224,7 @@ pub async fn init_modulator(
 
         let (payload_tx, payload_rx) = broadcast::channel(M2S_SERVER_QUEUE_SIZE);
 
-        m2s_ln = Some(create_m2s_listener(m2s_config, payload_tx).await?);
+        m2s_ln = Some(create_m2s_listener(m2s_config, payload_tx, worker_threads).await?);
         m2s_payload_rx = Some(payload_rx);
       }
 
@@ -259,7 +260,11 @@ pub async fn init_modulator(
 ///
 /// Returns an `S2mListener` on success, or an error if:
 /// - Configuration validation fails
-pub async fn create_s2m_listener<M>(config: S2mServerConfig, modulator: M) -> anyhow::Result<S2mListener<M>>
+pub async fn create_s2m_listener<M>(
+  config: S2mServerConfig,
+  modulator: M,
+  worker_threads: usize,
+) -> anyhow::Result<S2mListener<M>>
 where
   M: Modulator,
 {
@@ -276,7 +281,7 @@ where
     dispatcher_factory,
   );
 
-  Ok(S2mListener::new(arc_config.server.listener.clone(), conn_mng))
+  Ok(S2mListener::new(arc_config.server.listener.clone(), conn_mng, worker_threads))
 }
 
 /// Creates an M2S listener.
@@ -294,6 +299,7 @@ where
 pub async fn create_m2s_listener(
   config: M2sServerConfig,
   payload_tx: broadcast::Sender<OutboundPrivatePayload>,
+  worker_threads: usize,
 ) -> anyhow::Result<M2sListener> {
   config.validate().map_err(|e| anyhow::anyhow!("failed to validate m2s server configuration: {}", e))?;
 
@@ -306,5 +312,5 @@ pub async fn create_m2s_listener(
     dispatcher_factory,
   );
 
-  Ok(M2sListener::new(arc_config.listener.clone(), conn_mng))
+  Ok(M2sListener::new(arc_config.listener.clone(), conn_mng, worker_threads))
 }

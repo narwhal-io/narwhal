@@ -8,8 +8,9 @@ use rustls::ServerConfig;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, info, warn};
+use tracing::{info, trace, warn};
 
+use narwhal_common::conn::ConnWorkerPool;
 use narwhal_common::service::{C2sService, Service};
 
 use crate::c2s::config::ListenerConfig;
@@ -21,6 +22,14 @@ const LOCALHOST_DOMAIN: &str = "localhost";
 /// The C2S connection manager.
 type C2sConnManager =
   narwhal_common::conn::ConnManager<c2s::conn::C2sDispatcher, c2s::conn::C2sDispatcherFactory, C2sService>;
+
+/// The C2S connection worker pool type.
+type C2sConnWorkerPool = ConnWorkerPool<
+  tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+  c2s::conn::C2sDispatcher,
+  c2s::conn::C2sDispatcherFactory,
+  C2sService,
+>;
 
 /// A TLS-enabled TCP listener for client-to-server (C2S) connections.
 ///
@@ -36,6 +45,12 @@ pub struct C2sListener {
 
   /// The connection manager.
   conn_mng: C2sConnManager,
+
+  /// The connection worker pool.
+  worker_pool: Option<C2sConnWorkerPool>,
+
+  /// The number of worker threads for the connection pool.
+  worker_threads: usize,
 
   /// The channel to signal the listener to stop.
   done_tx: Option<mpsc::Sender<()>>,
@@ -53,12 +68,13 @@ impl C2sListener {
   ///
   /// * `config` - The configuration for the C2S listener
   /// * `conn_mng` - The connection manager that will handle established connections
+  /// * `worker_threads` - The number of worker threads for the connection pool
   ///
   /// # Returns
   ///
   /// Returns a new `C2sListener` instance that is ready to be bootstrapped.
-  pub fn new(config: ListenerConfig, conn_mng: C2sConnManager) -> Self {
-    Self { config, conn_mng, done_tx: None, local_address: None }
+  pub fn new(config: ListenerConfig, conn_mng: C2sConnManager, worker_threads: usize) -> Self {
+    Self { config, conn_mng, worker_pool: None, worker_threads, done_tx: None, local_address: None }
   }
 
   /// Bootstraps the listener, starting to accept incoming connections.
@@ -75,14 +91,17 @@ impl C2sListener {
   /// * Unable to bind to the configured address and port
   pub async fn bootstrap(&mut self) -> anyhow::Result<()> {
     assert!(self.done_tx.is_none());
+    assert!(self.worker_pool.is_none());
 
     // Bootstrap the connection manager.
     self.conn_mng.bootstrap().await?;
 
+    // Create the connection worker pool.
+    let worker_pool = ConnWorkerPool::new(self.worker_threads, self.conn_mng.clone())?;
+    self.worker_pool = Some(worker_pool.clone());
+
     let (done_tx, mut done_rx) = mpsc::channel(1);
     self.done_tx = Some(done_tx);
-
-    let conn_mng = self.conn_mng.clone();
 
     let tls_config = self.load_tls_config()?;
     let acceptor = TlsAcceptor::from(tls_config);
@@ -98,7 +117,7 @@ impl C2sListener {
 
       loop {
         tokio::select! {
-          _ = Self::accept_connection(&mut listener, acceptor.clone(), conn_mng.clone()) => {}
+          _ = Self::accept_connection(&mut listener, acceptor.clone(), worker_pool.clone()) => {}
           _ = done_rx.recv() => {
             break;
           }
@@ -140,6 +159,8 @@ impl C2sListener {
       service_type = C2sService::NAME,
       "stopped accepting socket connections"
     );
+
+    self.worker_pool.take();
 
     // Wait for the connection manager to stop.
     self.conn_mng.shutdown().await?;
@@ -193,35 +214,21 @@ impl C2sListener {
   async fn accept_connection(
     listener: &mut TcpListener,
     acceptor: TlsAcceptor,
-    conn_mng: C2sConnManager,
+    worker_pool: C2sConnWorkerPool,
   ) -> anyhow::Result<()> {
     let (tcp_stream, addr) = listener.accept().await?;
 
-    debug!(local_address = format!("{:?}", addr), service_type = C2sService::NAME, "accepted connection");
+    trace!(local_address = format!("{:?}", addr), service_type = C2sService::NAME, "accepted connection");
 
-    tokio::spawn(async move {
-      match handle_connection(tcp_stream, acceptor, conn_mng).await {
-        Ok(()) => {},
-        Err(err) => {
-          warn!(error = ?err, service_type = C2sService::NAME, "failed to handle connection");
-        },
-      }
-    });
+    worker_pool
+      .submit(move || async move {
+        // Negotiate the TLS connection.
+        let tls_stream = acceptor.accept(tcp_stream).await?;
+
+        Ok(tls_stream)
+      })
+      .await;
 
     Ok(())
   }
-}
-
-async fn handle_connection(
-  tcp_stream: tokio::net::TcpStream,
-  acceptor: TlsAcceptor,
-  conn_mng: C2sConnManager,
-) -> anyhow::Result<()> {
-  // Negotiate the TLS connection.
-  let tls_stream = acceptor.accept(tcp_stream).await?;
-
-  // Run the connection manager.
-  conn_mng.run(tls_stream).await?;
-
-  Ok(())
 }

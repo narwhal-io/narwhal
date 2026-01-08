@@ -7,6 +7,7 @@ license = "BSD-3-Clause"
 [dependencies]
 anyhow = "1.0.98"
 async-trait = "0.1.88"
+core_affinity = "0.8.1"
 futures = "0.3"
 tokio = { version = "1.48.0", features = ["full"] }
 tokio-util = "0.7.16"
