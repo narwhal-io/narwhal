@@ -8,7 +8,7 @@ All notable changes to Narwhal will be documented in this file.
 * [CHANGE]: Add `ResourceConflict` error for concurrent modification scenarios. [#109](https://github.com/narwhal-io/narwhal/pull/109)
 * [CHANGE]: Refactor ACL commands to support granular type-based operations. [#115](https://github.com/narwhal-io/narwhal/pull/115)
 * [CHANGE]: Add dedicated ACK messages for `SET_CHAN_ACL` and `SET_CHAN_CONFIG` operations. [#116](https://github.com/narwhal-io/narwhal/pull/116)
-* [ENHANCEMENT]: Use optimized single-threaded runtime when `NARWHAL_WORKER_THREADS=1`. [#124](https://github.com/narwhal-io/narwhal/pull/124)
+* [ENHANCEMENT]: Distribute connections across CPU-pinned worker threads for improved performance. [#127](https://github.com/narwhal-io/narwhal/pull/127)
 * [ENHANCEMENT]: Add pagination support to `CHANNELS`/`CHANNELS_ACK` messages. [#110](https://github.com/narwhal-io/narwhal/pull/110), [#112](https://github.com/narwhal-io/narwhal/pull/112)
 * [ENHANCEMENT]: Add pagination support to `MEMBERS`/`MEMBERS_ACK` messages. [#113](https://github.com/narwhal-io/narwhal/pull/113)
 * [ENHANCEMENT]: Add pagination support to `GET_CHAN_ACL`/`CHAN_ACL` messages. [#117](https://github.com/narwhal-io/narwhal/pull/117)

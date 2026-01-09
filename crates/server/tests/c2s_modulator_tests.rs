@@ -34,7 +34,7 @@ async fn test_c2s_modulator_single_step_auth() -> anyhow::Result<()> {
   let modulator = TestModulator::new()
     .with_auth_handler(|_| async { Ok(AuthResult::Success { username: StringAtom::from("test_user") }) });
 
-  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator).await?;
+  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator, 1).await?;
   s2m_ln.bootstrap().await?;
 
   let s2m_client = S2mClient::new(S2mClientConfig {
@@ -76,7 +76,7 @@ async fn test_c2s_modulator_single_step_auth() -> anyhow::Result<()> {
 async fn test_c2s_modulator_auth_failed() -> anyhow::Result<()> {
   let modulator = TestModulator::new().with_auth_handler(|_| async { Ok(AuthResult::Failure) });
 
-  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator).await?;
+  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator, 1).await?;
   s2m_ln.bootstrap().await?;
 
   let s2m_client = S2mClient::new(S2mClientConfig {
@@ -126,7 +126,7 @@ async fn test_c2s_modulator_multi_step_auth() -> anyhow::Result<()> {
     }
   });
 
-  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator).await?;
+  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator, 1).await?;
   s2m_ln.bootstrap().await?;
 
   let s2m_client = S2mClient::new(S2mClientConfig {
@@ -192,7 +192,7 @@ async fn test_c2s_modulator_send_private_payload() -> anyhow::Result<()> {
     if is_valid { Ok(SendPrivatePayloadResult::Valid) } else { Ok(SendPrivatePayloadResult::Invalid) }
   });
 
-  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator).await?;
+  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator, 1).await?;
   s2m_ln.bootstrap().await?;
 
   let s2m_client = S2mClient::new(S2mClientConfig {
@@ -272,7 +272,7 @@ async fn test_c2s_modulator_receive_private_payload() -> anyhow::Result<()> {
   let (m2s_payload_tx, m2s_payload_rx) = broadcast::channel::<OutboundPrivatePayload>(1);
 
   // Create M2S listener with the M2S->C2S channel.
-  let mut m2s_listener = create_m2s_listener(m2s_config, m2s_payload_tx).await?;
+  let mut m2s_listener = create_m2s_listener(m2s_config, m2s_payload_tx, 1).await?;
   m2s_listener.bootstrap().await?;
 
   // Create a channel for triggering the modulator.
@@ -315,7 +315,7 @@ async fn test_c2s_modulator_receive_private_payload() -> anyhow::Result<()> {
   s2m_config.m2s_client.address = m2s_listener.local_address().unwrap().to_string();
   s2m_config.m2s_client.shared_secret = SHARED_SECRET.to_string();
 
-  let mut s2m_ln = create_s2m_listener(s2m_config, modulator).await?;
+  let mut s2m_ln = create_s2m_listener(s2m_config, modulator, 1).await?;
   s2m_ln.bootstrap().await?;
 
   let s2m_client = S2mClient::new(S2mClientConfig {
@@ -375,7 +375,7 @@ async fn test_c2s_modulator_broadcast_payload_validation() -> anyhow::Result<()>
       if is_valid { Ok(ForwardBroadcastPayloadResult::Valid) } else { Ok(ForwardBroadcastPayloadResult::Invalid) }
     });
 
-  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator).await?;
+  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator, 1).await?;
   s2m_ln.bootstrap().await?;
 
   let s2m_client = S2mClient::new(S2mClientConfig {
@@ -464,7 +464,7 @@ async fn test_c2s_modulator_broadcast_payload_alteration() -> anyhow::Result<()>
       Ok(ForwardBroadcastPayloadResult::ValidWithAlteration { altered_payload: pool_buffer })
     });
 
-  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator).await?;
+  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator, 1).await?;
   s2m_ln.bootstrap().await?;
 
   let s2m_client = S2mClient::new(S2mClientConfig {
@@ -546,7 +546,7 @@ async fn test_c2s_modulator_forward_event() -> anyhow::Result<()> {
     }
   });
 
-  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator).await?;
+  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator, 1).await?;
   s2m_ln.bootstrap().await?;
 
   let s2m_client = S2mClient::new(S2mClientConfig {
@@ -654,7 +654,7 @@ async fn test_c2s_modulator_channel_survives_single_connection_drop() -> anyhow:
   let modulator = TestModulator::new()
     .with_auth_handler(|_| async { Ok(AuthResult::Success { username: StringAtom::from(TEST_USER_1) }) });
 
-  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator).await?;
+  let mut s2m_ln = create_s2m_listener(default_s2m_config(SHARED_SECRET), modulator, 1).await?;
   s2m_ln.bootstrap().await?;
 
   let s2m_client = S2mClient::new(S2mClientConfig {

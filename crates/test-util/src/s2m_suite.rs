@@ -32,7 +32,7 @@ impl<M: Modulator> S2mSuite<M> {
 
     let conn_mng = narwhal_modulator::conn::S2mConnManager::<M>::new(&server_config, dispatcher_factory);
 
-    let ln = S2mListener::new(server_config.listener.clone(), conn_mng.clone());
+    let ln = S2mListener::new(server_config.listener.clone(), conn_mng.clone(), 1);
 
     Self { config: arc_config, ln }
   }

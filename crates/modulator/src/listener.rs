@@ -8,60 +8,73 @@ use anyhow::anyhow;
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{info, trace};
 
+use narwhal_common::conn::{ConnManager, ConnWorkerPool, Dispatcher, DispatcherFactory};
 use narwhal_common::service::{M2sService, S2mService, Service};
 use narwhal_util::conn::Stream;
 
 use crate::config::*;
-use crate::conn::{M2sConnManager, S2mConnManager};
 
 /// Type alias for S2M listener.
-pub type S2mListener<M> = Listener<S2mConnManager<M>, S2mService>;
+pub type S2mListener<M> = Listener<crate::conn::S2mDispatcher<M>, crate::conn::S2mDispatcherFactory<M>, S2mService>;
 
 /// Type alias for M2S listener.
-pub type M2sListener = Listener<M2sConnManager, M2sService>;
+pub type M2sListener = Listener<crate::conn::M2sDispatcher, crate::conn::M2sDispatcherFactory, M2sService>;
 
 /// Modulator server listener.
-pub struct Listener<CM, ST> {
+pub struct Listener<D, DF, ST>
+where
+  D: Dispatcher,
+  DF: DispatcherFactory<D>,
+  ST: Service,
+{
   /// The listener configuration.
   config: ListenerConfig,
 
   /// The connection manager.
-  conn_mng: CM,
+  conn_mng: ConnManager<D, DF, ST>,
+
+  /// The connection worker pool.
+  worker_pool: Option<ConnWorkerPool<Stream, D, DF, ST>>,
+
+  /// The number of worker threads for the connection pool.
+  worker_threads: usize,
 
   /// The channel to signal the listener to stop.
   done_tx: Option<mpsc::Sender<()>>,
 
   /// The local address of the listener (only for TCP).
   local_address: Option<SocketAddr>,
-
-  /// Phantom data for the service type
-  _service_type: std::marker::PhantomData<ST>,
 }
 
 // ===== impl Listener =====
 
-impl<CM, ST> Listener<CM, ST>
+impl<D, DF, ST> Listener<D, DF, ST>
 where
-  CM: Clone + Send + Sync + 'static,
+  D: Dispatcher,
+  DF: DispatcherFactory<D>,
   ST: Service,
 {
   /// Creates a new listener.
-  pub fn new(config: ListenerConfig, conn_mng: CM) -> Self {
-    Listener { config, conn_mng, done_tx: None, local_address: None, _service_type: std::marker::PhantomData }
+  ///
+  /// # Arguments
+  ///
+  /// * `config` - The configuration for the listener
+  /// * `conn_mng` - The connection manager that will handle established connections
+  /// * `worker_threads` - The number of worker threads for the connection pool
+  ///
+  /// # Returns
+  ///
+  /// Returns a new `Listener` instance that is ready to be bootstrapped.
+  pub fn new(config: ListenerConfig, conn_mng: ConnManager<D, DF, ST>, worker_threads: usize) -> Self {
+    Listener { config, conn_mng, worker_pool: None, worker_threads, done_tx: None, local_address: None }
   }
-}
 
-impl<D, DF, ST> Listener<narwhal_common::conn::ConnManager<D, DF, ST>, ST>
-where
-  D: narwhal_common::conn::Dispatcher,
-  DF: narwhal_common::conn::DispatcherFactory<D>,
-  ST: Service,
-{
   /// Starts the listener.
   pub async fn bootstrap(&mut self) -> anyhow::Result<()> {
     assert!(self.done_tx.is_none());
+    assert!(self.worker_pool.is_none());
 
     let (done_tx, done_rx) = mpsc::channel(1);
     self.done_tx = Some(done_tx);
@@ -69,12 +82,16 @@ where
     let conn_mng = self.conn_mng.clone();
     conn_mng.bootstrap().await?;
 
+    // Create the connection worker pool.
+    let worker_pool = ConnWorkerPool::new(self.worker_threads, conn_mng.clone())?;
+    self.worker_pool = Some(worker_pool.clone());
+
     match self.config.network.as_str() {
       TCP_NETWORK => {
-        self.listen_tcp(conn_mng, done_rx).await?;
+        self.listen_tcp(worker_pool, done_rx).await?;
       },
       UNIX_NETWORK => {
-        self.listen_unix(conn_mng, done_rx).await?;
+        self.listen_unix(worker_pool, done_rx).await?;
       },
       _ => {
         anyhow::bail!("unsupported network type: {}", self.config.network);
@@ -90,7 +107,7 @@ where
 
   async fn listen_tcp(
     &mut self,
-    conn_mng: narwhal_common::conn::ConnManager<D, DF, ST>,
+    worker_pool: ConnWorkerPool<Stream, D, DF, ST>,
     mut done_rx: Receiver<()>,
   ) -> anyhow::Result<()> {
     let config = self.config.clone();
@@ -108,7 +125,7 @@ where
 
       loop {
         tokio::select! {
-            _ = Self::accept_tcp_connection(&mut listener, conn_mng.clone()) => {},
+            _ = Self::accept_tcp_connection(&mut listener, worker_pool.clone()) => {},
             _ = done_rx.recv() => {
                 break;
             }
@@ -130,7 +147,7 @@ where
 
   async fn listen_unix(
     &self,
-    conn_mng: narwhal_common::conn::ConnManager<D, DF, ST>,
+    worker_pool: ConnWorkerPool<Stream, D, DF, ST>,
     mut done_rx: Receiver<()>,
   ) -> anyhow::Result<()> {
     let config = self.config.clone();
@@ -158,7 +175,7 @@ where
 
       loop {
         tokio::select! {
-            _ = Self::accept_unix_connection(&mut listener, conn_mng.clone()) => {},
+            _ = Self::accept_unix_connection(&mut listener, worker_pool.clone()) => {},
             _ = done_rx.recv() => {
                 break;
             }
@@ -207,6 +224,8 @@ where
       },
     }
 
+    self.worker_pool.take();
+
     // Wait for the connection manager to stop.
     self.conn_mng.shutdown().await?;
 
@@ -215,63 +234,31 @@ where
 
   async fn accept_tcp_connection(
     listener: &mut TcpListener,
-    conn_mng: narwhal_common::conn::ConnManager<D, DF, ST>,
+    worker_pool: ConnWorkerPool<Stream, D, DF, ST>,
   ) -> anyhow::Result<()> {
     let (tcp_stream, addr) = listener.accept().await?;
 
-    debug!(
+    trace!(
       network = TCP_NETWORK,
       local_address = format!("{:?}", addr),
       service_type = ST::NAME,
       "accepted connection"
     );
 
-    tokio::spawn(async move {
-      match Self::handle_tcp_connection(tcp_stream, conn_mng).await {
-        Ok(()) => {},
-        Err(err) => {
-          warn!(error = ?err, network = TCP_NETWORK, service_type = ST::NAME, "failed to handle connection");
-        },
-      }
-    });
+    worker_pool.submit(move || async move { Ok(Stream::Tcp(tcp_stream)) }).await;
 
     Ok(())
   }
 
   async fn accept_unix_connection(
     listener: &mut UnixListener,
-    conn_mng: narwhal_common::conn::ConnManager<D, DF, ST>,
+    worker_pool: ConnWorkerPool<Stream, D, DF, ST>,
   ) -> anyhow::Result<()> {
     let (unix_stream, _) = listener.accept().await?;
 
-    debug!(network = UNIX_NETWORK, service_type = ST::NAME, "accepted connection");
+    trace!(network = UNIX_NETWORK, service_type = ST::NAME, "accepted connection");
 
-    tokio::spawn(async move {
-      match Self::handle_unix_connection(unix_stream, conn_mng).await {
-        Ok(()) => {},
-        Err(err) => {
-          warn!(error = ?err, network = UNIX_NETWORK, service_type = ST::NAME, "failed to handle connection");
-        },
-      }
-    });
-
-    Ok(())
-  }
-
-  async fn handle_tcp_connection(
-    tcp_stream: tokio::net::TcpStream,
-    conn_mng: narwhal_common::conn::ConnManager<D, DF, ST>,
-  ) -> anyhow::Result<()> {
-    conn_mng.run(Stream::Tcp(tcp_stream)).await?;
-
-    Ok(())
-  }
-
-  async fn handle_unix_connection(
-    unix_stream: tokio::net::UnixStream,
-    conn_mng: narwhal_common::conn::ConnManager<D, DF, ST>,
-  ) -> anyhow::Result<()> {
-    conn_mng.run(Stream::Unix(unix_stream)).await?;
+    worker_pool.submit(move || async move { Ok(Stream::Unix(unix_stream)) }).await;
 
     Ok(())
   }
