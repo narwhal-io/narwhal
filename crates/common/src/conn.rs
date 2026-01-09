@@ -21,7 +21,7 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error, info, trace, warn};
 
 use narwhal_protocol::ErrorReason::{
   BadRequest, InternalServerError, OutboundQueueIsFull, PolicyViolation, ResponseTooLarge, ServerShuttingDown, Timeout,
@@ -630,7 +630,7 @@ impl<D: Dispatcher> ConnInner<D> {
 
     let cancellation_token = self.cancellation_token.clone();
 
-    task_tracker.spawn(async move {
+    task_tracker.spawn_local(async move {
       tokio::select! {
         res = future => {
             if let Err(e) = res && let Err(e) = Self::notify_error::<ST>(e, tx, handler) {
@@ -641,7 +641,7 @@ impl<D: Dispatcher> ConnInner<D> {
           error!(handler = handler, service_type = ST::NAME, "request timeout");
         },
         _ = cancellation_token.cancelled() => {
-          debug!(handler = handler, service_type = ST::NAME, "request cancelled");
+          trace!(handler = handler, service_type = ST::NAME, "request cancelled");
         },
       }
 
@@ -656,7 +656,7 @@ impl<D: Dispatcher> ConnInner<D> {
   fn schedule_timeout(&mut self, timeout: Duration, detail: Option<StringAtom>) {
     let tx = self.tx.clone();
 
-    let timeout_task = tokio::spawn(async move {
+    let timeout_task = tokio::task::spawn_local(async move {
       tokio::time::sleep(timeout).await;
 
       tx.close(Message::Error(ErrorParameters { id: None, reason: Timeout.into(), detail }));
@@ -678,7 +678,7 @@ impl<D: Dispatcher> ConnInner<D> {
     let (pong_tx, mut pong_rx) = tokio::sync::mpsc::channel::<u32>(1);
     self.pong_notifier = Some(pong_tx);
 
-    let ping_task = tokio::spawn(async move {
+    let ping_task = tokio::task::spawn_local(async move {
       let mut last_check_counter = activity_counter.load(Ordering::Relaxed);
 
       loop {
@@ -1491,26 +1491,32 @@ where
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
 
     rt.block_on(async move {
-      while let Some(stream_provider) = rx.recv().await {
-        let conn_manager = conn_manager.clone();
-        let active_streams = active_streams.clone();
+      let local = tokio::task::LocalSet::new();
 
-        tokio::task::spawn(async move {
-          let stream = match stream_provider().await {
-            Ok(s) => s,
-            Err(e) => {
-              warn!("connection provider failed: {}", e.to_string());
-              return;
-            },
-          };
+      local
+        .run_until(async move {
+          while let Some(stream_provider) = rx.recv().await {
+            let conn_manager = conn_manager.clone();
+            let active_streams = active_streams.clone();
 
-          active_streams.fetch_add(1, Ordering::Relaxed);
+            tokio::task::spawn_local(async move {
+              let stream = match stream_provider().await {
+                Ok(s) => s,
+                Err(e) => {
+                  warn!("connection provider failed: {}", e.to_string());
+                  return;
+                },
+              };
 
-          conn_manager.run(stream).await;
+              active_streams.fetch_add(1, Ordering::Relaxed);
 
-          active_streams.fetch_sub(1, Ordering::Relaxed);
-        });
-      }
+              conn_manager.run(stream).await;
+
+              active_streams.fetch_sub(1, Ordering::Relaxed);
+            });
+          }
+        })
+        .await;
     });
   }
 }
