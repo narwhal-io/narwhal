@@ -106,6 +106,7 @@ Narwhal uses TOML format for configuration. See the [`examples/config/`](example
 ## Documentation
 
 - **[Protocol Specification](docs/PROTOCOL.md)**: Complete protocol documentation including message formats, flow examples, and wire format details
+- **[Benchmark Results](docs/BENCHMARK.md)**: Performance benchmarks and throughput analysis across different payload sizes
 - **[Code of Conduct](CODE_OF_CONDUCT.md)**: Community guidelines
 - **[Contributing Guide](CONTRIBUTING.md)**: How to contribute to the project
 
