@@ -14,11 +14,11 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use core_affinity::CoreId;
-use parking_lot::Mutex as PlMutex;
+
 use rand::random;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf};
-use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{error, info, trace, warn};
@@ -30,8 +30,8 @@ use narwhal_protocol::{ErrorParameters, Message, PingParameters, SerializeError,
 
 use narwhal_util::codec::{StreamReader, StreamReaderError};
 use narwhal_util::io::write_all_vectored;
+use narwhal_util::object_pool::ObjectPool;
 use narwhal_util::pool::{BucketedPool, MutablePoolBuffer, Pool, PoolBuffer};
-use narwhal_util::slab::{Slab, SlabRef};
 use narwhal_util::string_atom::StringAtom;
 
 use crate::service::Service;
@@ -171,9 +171,8 @@ pub trait DispatcherFactory<D: Dispatcher>: Clone + Send + Sync + 'static {
   ///
   /// # Returns
   ///
-  /// A slab reference to the dispatcher instance, ready to handle
-  /// messages for the new connection.
-  async fn create(&mut self, handler: usize, tx: ConnTx) -> SlabRef<D>;
+  /// A boxed dispatcher instance, ready to handle messages for the new connection.
+  async fn create(&mut self, handler: usize, tx: ConnTx) -> Box<D>;
 
   /// Bootstraps the dispatcher factory with initial configuration and resources.
   ///
@@ -245,13 +244,15 @@ pub struct Config {
 }
 
 /// The connection manager inner state.
-#[derive(Debug)]
 struct ConnManagerInner<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> {
   /// The connection manager configuration.
   config: Arc<Config>,
 
-  /// The connections.
-  connections: Slab<Conn<D>>,
+  /// The connections pool.
+  connections: ObjectPool<Conn<D>>,
+
+  /// The next handler ID to assign.
+  next_handler: Arc<AtomicUsize>,
 
   /// The connection dispatcher factory.
   dispatcher_factory: DF,
@@ -270,6 +271,20 @@ struct ConnManagerInner<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> {
 
   /// Phantom data for the service type.
   _service_type: PhantomData<ST>,
+}
+
+impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> std::fmt::Debug for ConnManagerInner<D, DF, ST> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("ConnManagerInner")
+      .field("config", &self.config)
+      .field("next_handler", &self.next_handler)
+      .field("dispatcher_factory", &"<dispatcher_factory>")
+      .field("message_buffer_pool", &self.message_buffer_pool)
+      .field("payload_buffer_pool", &self.payload_buffer_pool)
+      .field("task_tracker", &self.task_tracker)
+      .field("shutdown_token", &self.shutdown_token)
+      .finish()
+  }
 }
 
 /// The connection manager.
@@ -291,7 +306,7 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
 
     let max_connections = conn_cfg.max_connections as usize;
 
-    let connections = Slab::with_capacity(max_connections);
+    let connections = ObjectPool::with_capacity(max_connections);
 
     // Account for the fact that each connection has two message buffers (read and write)
     let max_message_pool_buffers = max_connections * 2 + MAX_IOVS;
@@ -318,6 +333,7 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
     let inner = ConnManagerInner {
       config: Arc::new(conn_cfg),
       connections,
+      next_handler: Arc::new(AtomicUsize::new(1)),
       dispatcher_factory,
       message_buffer_pool,
       payload_buffer_pool,
@@ -335,7 +351,7 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
 
     inner.dispatcher_factory.bootstrap().await?;
 
-    info!(max_conns = inner.connections.capacity().await, service_type = ST::NAME, "connection manager started");
+    info!(max_conns = inner.config.max_connections, service_type = ST::NAME, "connection manager started");
 
     Ok(())
   }
@@ -343,8 +359,6 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
   /// Shuts down the connection manager.
   pub async fn shutdown(&self) -> anyhow::Result<()> {
     let mut inner = self.0.write().await;
-
-    let connection_count = inner.connections.len().await;
 
     // Notify the shutdown to all active connections.
     inner.shutdown_token.cancel();
@@ -355,7 +369,7 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
 
     inner.dispatcher_factory.shutdown().await?;
 
-    info!(connection_count = connection_count, service_type = ST::NAME, "connection manager stopped");
+    info!(service_type = ST::NAME, "connection manager stopped");
 
     Ok(())
   }
@@ -369,60 +383,58 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
     let config = inner.config.clone();
     let message_buffer_pool = inner.message_buffer_pool.clone();
     let payload_buffer_pool = inner.payload_buffer_pool.clone();
-    let mut conns = inner.connections.clone();
+    let conns = inner.connections.clone();
+    let next_handler = inner.next_handler.clone();
     let shutdown_token = inner.shutdown_token.clone();
     let mut dispatcher_factory = inner.dispatcher_factory.clone();
 
     drop(inner);
 
     // Acquire a connection.
-    let conn_ref_opt = conns.acquire().await;
+    let conn_opt = conns.get();
 
     // If no connection is available, send an error message and return.
-    if conn_ref_opt.is_none() {
+    if conn_opt.is_none() {
       let _ = stream.write_all(SERVER_OVERLOADED_ERROR).await;
       let _ = stream.flush().await;
 
       let _ = stream.shutdown().await;
 
-      let max_conns = conns.capacity().await;
+      let max_conns = config.max_connections;
       warn!(max_conns, service_type = ST::NAME, "max connections limit reached");
 
       return;
     }
-    let conn_ref = conn_ref_opt.unwrap();
+    let mut conn = conn_opt.unwrap();
 
     let send_msg_channel_size = config.outbound_message_queue_size as usize;
 
     let (send_msg_tx, send_msg_rx) = channel(send_msg_channel_size);
     let (close_tx, close_rx) = channel(1);
-    {
-      let mut conn = conn_ref.write().await;
 
-      let handler = conn_ref.handler;
-      let tx = ConnTx { send_msg_tx, close_tx };
+    // Assign a unique handler
+    let handler = next_handler.fetch_add(1, Ordering::SeqCst);
+    let tx = ConnTx { send_msg_tx, close_tx };
 
-      let dispatcher_ref = dispatcher_factory.create(handler, tx.clone()).await;
+    let dispatcher = dispatcher_factory.create(handler, tx.clone()).await;
 
-      conn.0 = Some(ConnInner {
-        handler,
-        config: config.clone(),
-        state: State::Connecting,
-        dispatcher_ref,
-        task_tracker: TaskTracker::new(),
-        cancellation_token: CancellationToken::new(),
-        activity_counter: Arc::new(AtomicU64::new(0)),
-        pong_notifier: None,
-        scheduled_task: Arc::new(PlMutex::new(None)),
-        inflight_requests: Arc::new(AtomicU32::new(0)),
-        tx,
-      });
+    conn.0 = Some(ConnInner {
+      handler,
+      config: config.clone(),
+      state: State::Connecting,
+      dispatcher: Arc::new(Mutex::new(dispatcher)),
+      task_tracker: TaskTracker::new(),
+      cancellation_token: CancellationToken::new(),
+      activity_counter: Arc::new(AtomicU64::new(0)),
+      pong_notifier: None,
+      scheduled_task: None,
+      inflight_requests: Arc::new(AtomicU32::new(0)),
+      tx,
+    });
 
-      conn.schedule_timeout(config.connect_timeout, Some(StringAtom::from("connection timeout")));
-    }
+    conn.schedule_timeout(config.connect_timeout, Some(StringAtom::from("connection timeout")));
 
-    let conn_count = conns.len().await;
-    trace!(handler = conn_ref.handler, connection_count = conn_count, service_type = ST::NAME, "connection registered");
+    trace!(handler = handler, service_type = ST::NAME, "connection registered");
 
     // Run loop until the connection is closed.
     let payload_read_timeout = config.payload_read_timeout;
@@ -433,7 +445,8 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
 
     match ConnInner::<D>::run_connection::<T, ST>(
       stream,
-      conn_ref.clone(),
+      &mut conn,
+      handler,
       send_msg_rx,
       close_rx,
       shutdown_token,
@@ -447,19 +460,15 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
     {
       Ok(_) => {},
       Err(e) => {
-        warn!(handler = conn_ref.handler, service_type = ST::NAME, "connection error: {}", e.to_string());
+        warn!(handler = handler, service_type = ST::NAME, "connection error: {}", e.to_string());
       },
     }
 
-    conn_ref.release().await;
+    // Reset the connection and return to pool
+    *conn = Conn::default();
+    conns.put(conn);
 
-    let conn_count = conns.len().await;
-    trace!(
-      handler = conn_ref.handler,
-      connection_count = conn_count,
-      service_type = ST::NAME,
-      "connection deregistered"
-    );
+    trace!(handler = handler, service_type = ST::NAME, "connection deregistered");
   }
 }
 
@@ -498,13 +507,13 @@ pub struct ConnInner<D: Dispatcher> {
   state: State,
 
   /// The connection dispatcher.
-  dispatcher_ref: SlabRef<D>,
-
-  /// Current number of inflight requests.
-  inflight_requests: Arc<AtomicU32>,
+  dispatcher: Arc<Mutex<Box<D>>>,
 
   /// The transmitter channels.
   tx: ConnTx,
+
+  /// Current number of inflight requests.
+  inflight_requests: Arc<AtomicU32>,
 
   // Increments on every received message
   activity_counter: Arc<AtomicU64>,
@@ -513,7 +522,7 @@ pub struct ConnInner<D: Dispatcher> {
   pong_notifier: Option<tokio::sync::mpsc::Sender<u32>>,
 
   /// Current scheduled task (ping or timeout).
-  scheduled_task: Arc<PlMutex<Option<tokio::task::JoinHandle<()>>>>,
+  scheduled_task: Option<tokio::task::JoinHandle<()>>,
 
   /// Track tasks associated with connection requests.
   task_tracker: TaskTracker,
@@ -526,7 +535,7 @@ pub struct ConnInner<D: Dispatcher> {
 
 impl<D: Dispatcher> ConnInner<D> {
   async fn dispatch_message<ST: Service>(&mut self, msg: Message, payload: Option<PoolBuffer>) -> anyhow::Result<()> {
-    let dispatcher_ref = self.dispatcher_ref.clone();
+    let dispatcher = self.dispatcher.clone();
 
     match self.state {
       State::Authenticated { .. } => {
@@ -544,9 +553,9 @@ impl<D: Dispatcher> ConnInner<D> {
         let tx = self.tx.clone();
 
         self.submit_request::<_, ST>(async move {
-          let mut dispatcher = dispatcher_ref.write().await;
+          let mut dispatcher_guard = dispatcher.lock().await;
 
-          match dispatcher.dispatch_message(msg, payload, state).await {
+          match dispatcher_guard.dispatch_message(msg, payload, state).await {
             Ok(_) => {},
             Err(e) => {
               Self::notify_error::<ST>(e, tx, handler)?;
@@ -559,7 +568,7 @@ impl<D: Dispatcher> ConnInner<D> {
         self.activity_counter.fetch_add(1, Ordering::Relaxed);
       },
       _ => {
-        match dispatcher_ref.write().await.dispatch_message(msg, payload, self.state).await {
+        match dispatcher.lock().await.dispatch_message(msg, payload, self.state).await {
           Ok(Some(new_state)) => {
             assert!(new_state >= self.state, "invalid state transition");
 
@@ -661,7 +670,7 @@ impl<D: Dispatcher> ConnInner<D> {
 
       tx.close(Message::Error(ErrorParameters { id: None, reason: Timeout.into(), detail }));
     });
-    self.scheduled_task.lock().replace(timeout_task);
+    self.scheduled_task = Some(timeout_task);
   }
 
   /// Runs the ping/pong monitoring loop
@@ -731,19 +740,19 @@ impl<D: Dispatcher> ConnInner<D> {
       }
     });
 
-    self.scheduled_task.lock().replace(ping_task);
+    self.scheduled_task = Some(ping_task);
   }
 
   /// Cancels currently scheduled task.
   fn cancel_scheduled_task(&mut self) {
-    if let Some(task) = self.scheduled_task.lock().take() {
+    if let Some(task) = self.scheduled_task.take() {
       task.abort()
     }
   }
 
   /// Bootstraps the connection.
   async fn bootstrap(&mut self) -> anyhow::Result<()> {
-    self.dispatcher_ref.write().await.bootstrap().await?;
+    self.dispatcher.lock().await.bootstrap().await?;
     Ok(())
   }
 
@@ -758,9 +767,8 @@ impl<D: Dispatcher> ConnInner<D> {
     self.task_tracker.close();
     self.task_tracker.wait().await;
 
-    // Shutdown and release the dispatcher.
-    self.dispatcher_ref.write().await.shutdown().await?;
-    self.dispatcher_ref.release().await;
+    // Shutdown the dispatcher.
+    self.dispatcher.lock().await.shutdown().await?;
 
     Ok(())
   }
@@ -784,7 +792,8 @@ impl<D: Dispatcher> ConnInner<D> {
   #[allow(clippy::too_many_arguments)]
   async fn run_connection<T, ST>(
     stream: T,
-    conn_ref: SlabRef<Conn<D>>,
+    conn: &mut Box<Conn<D>>,
+    handler: usize,
     send_msg_rx: Receiver<(Message, Option<PoolBuffer>)>,
     close_rx: Receiver<Message>,
     shutdown_token: CancellationToken,
@@ -798,18 +807,16 @@ impl<D: Dispatcher> ConnInner<D> {
     T: AsyncRead + AsyncWrite + Unpin,
     ST: Service,
   {
-    let handler = conn_ref.handler;
-
     let (reader, mut writer) = tokio::io::split(stream);
 
     // Bootstrap the connection.
-    conn_ref.write().await.bootstrap().await?;
+    conn.bootstrap().await?;
 
     let loop_result = async {
       Self::run_connection_loop::<_, _, ST>(
         reader,
         &mut writer,
-        &conn_ref,
+        conn,
         handler,
         send_msg_rx,
         close_rx,
@@ -827,7 +834,7 @@ impl<D: Dispatcher> ConnInner<D> {
     .await;
 
     // Shutdown the connection.
-    let shutdown_result = conn_ref.write().await.shutdown().await;
+    let shutdown_result = conn.shutdown().await;
 
     match writer.shutdown().await {
       Ok(_) => {},
@@ -852,7 +859,7 @@ impl<D: Dispatcher> ConnInner<D> {
   async fn run_connection_loop<T, W, ST>(
     reader: ReadHalf<T>,
     writer: &mut W,
-    conn_ref: &SlabRef<Conn<D>>,
+    conn: &mut Box<Conn<D>>,
     handler: usize,
     mut send_msg_rx: Receiver<(Message, Option<PoolBuffer>)>,
     mut close_rx: Receiver<Message>,
@@ -900,8 +907,6 @@ impl<D: Dispatcher> ConnInner<D> {
               match deserialize(Cursor::new(line_bytes)) {
                 Ok(msg) => {
                   // Dispatch the message to the connection.
-                  let mut conn_guard = conn_ref.write().await;
-
                   let mut payload_opt: Option<PoolBuffer> = None;
 
                   // Check if the message has an associated payload, and if so,
@@ -968,7 +973,7 @@ impl<D: Dispatcher> ConnInner<D> {
                   }
 
                   // Dispatch the message to the connection handler.
-                  match conn_guard.dispatch_message::<ST>(msg, payload_opt).await {
+                  match conn.dispatch_message::<ST>(msg, payload_opt).await {
                     Ok(_) => {},
                     Err(e) => {
                       warn!(handler = handler, service_type = ST::NAME, "failed to dispatch message: {}", e.to_string());
