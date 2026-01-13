@@ -21,8 +21,8 @@ use narwhal_protocol::{
   AclAction, AclType, AuthAckParameters, ConnectAckParameters, IdentifyAckParameters, Message, ModDirectAckParameters,
 };
 use narwhal_protocol::{ChannelId, Nid};
+use narwhal_util::object_pool::ObjectPool;
 use narwhal_util::pool::PoolBuffer;
-use narwhal_util::slab::{Slab, SlabRef};
 use narwhal_util::string_atom::StringAtom;
 
 use crate::c2s::{self, Config};
@@ -93,7 +93,7 @@ impl C2sDispatcherFactory {
       }
     };
 
-    let dispatchers: Slab<C2sDispatcher> = Slab::with_capacity(max_connections as usize);
+    let dispatchers: ObjectPool<C2sDispatcher> = ObjectPool::with_capacity(max_connections as usize);
 
     let inner =
       C2sDispatcherFactoryInner { config, channel_manager, c2s_router, modulator, dispatchers, auth_required };
@@ -104,15 +104,15 @@ impl C2sDispatcherFactory {
 
 #[async_trait]
 impl narwhal_common::conn::DispatcherFactory<C2sDispatcher> for C2sDispatcherFactory {
-  async fn create(&mut self, handler: usize, tx: ConnTx) -> SlabRef<C2sDispatcher> {
-    let mut inner = self.0.lock().await;
+  async fn create(&mut self, handler: usize, tx: ConnTx) -> Box<C2sDispatcher> {
+    let inner = self.0.lock().await;
 
-    let dispatcher_opt = inner.dispatchers.acquire().await;
+    let dispatcher_opt = inner.dispatchers.get();
     assert!(dispatcher_opt.is_some());
 
-    let dispatcher_ref = dispatcher_opt.unwrap();
+    let mut dispatcher = dispatcher_opt.unwrap();
 
-    dispatcher_ref.write().await.init(
+    dispatcher.init(
       handler,
       inner.config.clone(),
       inner.auth_required,
@@ -122,7 +122,7 @@ impl narwhal_common::conn::DispatcherFactory<C2sDispatcher> for C2sDispatcherFac
       tx,
     );
 
-    dispatcher_ref
+    dispatcher
   }
 
   async fn bootstrap(&mut self) -> anyhow::Result<()> {
@@ -148,8 +148,8 @@ pub struct C2sDispatcherFactoryInner {
   /// The modulator, if any.
   modulator: Option<Arc<dyn Modulator>>,
 
-  /// The dispatcher slab.
-  dispatchers: Slab<C2sDispatcher>,
+  /// The dispatcher pool.
+  dispatchers: ObjectPool<C2sDispatcher>,
 
   /// Whether authentication is required.
   auth_required: bool,

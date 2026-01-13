@@ -8,6 +8,7 @@ All notable changes to Narwhal will be documented in this file.
 * [CHANGE]: Add `ResourceConflict` error for concurrent modification scenarios. [#109](https://github.com/narwhal-io/narwhal/pull/109)
 * [CHANGE]: Refactor ACL commands to support granular type-based operations. [#115](https://github.com/narwhal-io/narwhal/pull/115)
 * [CHANGE]: Add dedicated ACK messages for `SET_CHAN_ACL` and `SET_CHAN_CONFIG` operations. [#116](https://github.com/narwhal-io/narwhal/pull/116)
+* [ENHANCEMENT]: Replace Slab with ObjectPool for simplified connection management. [#131](https://github.com/narwhal-io/narwhal/pull/131)
 * [ENHANCEMENT]: Distribute connections across CPU-pinned worker threads for improved performance. [#127](https://github.com/narwhal-io/narwhal/pull/127)
 * [ENHANCEMENT]: Use LocalSet for single-threaded connection worker tasks to reduce task scheduler overhead. [#128](https://github.com/narwhal-io/narwhal/pull/128)
 * [ENHANCEMENT]: Add pagination support to `CHANNELS`/`CHANNELS_ACK` messages. [#110](https://github.com/narwhal-io/narwhal/pull/110), [#112](https://github.com/narwhal-io/narwhal/pull/112)
