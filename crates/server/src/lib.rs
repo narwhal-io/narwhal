@@ -53,7 +53,7 @@ struct Config {
 ///
 /// Returns `Ok(())` on successful shutdown, or an error if any step fails during
 /// startup or shutdown.
-pub async fn run(config_file: Option<String>, worker_threads: usize) -> anyhow::Result<()> {
+pub async fn run(config_file: Option<String>, conn_worker_threads: usize) -> anyhow::Result<()> {
   // Parse the configuration file.
   let mut cfg = load_config(config_file)?;
 
@@ -62,7 +62,7 @@ pub async fn run(config_file: Option<String>, worker_threads: usize) -> anyhow::
 
   info!(
     version = VERSION,
-    worker_threads = worker_threads,
+    worker_threads = conn_worker_threads,
     branch = GIT_BRANCH_NAME,
     commit = GIT_COMMIT_HASH,
     "🚀 narwhal server is starting..."
@@ -78,7 +78,7 @@ pub async fn run(config_file: Option<String>, worker_threads: usize) -> anyhow::
     cfg.modulator.clone(),
     cfg.c2s_server.limits.max_message_size,
     cfg.c2s_server.limits.max_payload_size,
-    worker_threads,
+    conn_worker_threads,
   )
   .await?;
 
@@ -92,6 +92,8 @@ pub async fn run(config_file: Option<String>, worker_threads: usize) -> anyhow::
   let max_clients_per_channel = c2s_config.limits.max_clients_per_channel;
   let max_channels_per_client = c2s_config.limits.max_channels_per_client;
   let max_payload_size = c2s_config.limits.max_payload_size;
+
+  let max_connections = c2s_config.limits.max_connections as usize;
 
   let local_domain = StringAtom::from(c2s_config.listener.domain.as_str());
   let c2s_router = c2s::Router::new(local_domain.clone());
@@ -119,7 +121,8 @@ pub async fn run(config_file: Option<String>, worker_threads: usize) -> anyhow::
 
   let c2s_conn_mng = c2s::conn::C2sConnManager::new(c2s_config.as_ref(), c2s_dispatcher_factory);
 
-  let mut c2s_ln = c2s::C2sListener::new(c2s_config.listener.clone(), c2s_conn_mng, worker_threads);
+  let mut c2s_ln =
+    c2s::C2sListener::new(c2s_config.listener.clone(), c2s_conn_mng, conn_worker_threads, max_connections);
 
   // Start routing task for modulator private payloads.
   let mut route_m2s_payload_handle = Option::<(JoinHandle<()>, CancellationToken)>::None;
