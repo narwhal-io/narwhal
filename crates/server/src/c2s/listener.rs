@@ -49,14 +49,17 @@ pub struct C2sListener {
   /// The connection worker pool.
   worker_pool: Option<C2sConnWorkerPool>,
 
-  /// The number of worker threads for the connection pool.
-  worker_threads: usize,
-
   /// The channel to signal the listener to stop.
   done_tx: Option<mpsc::Sender<()>>,
 
   /// The local address of the listener.
   local_address: Option<SocketAddr>,
+
+  /// The number of worker threads for the connection pool.
+  conn_worker_threads: usize,
+
+  /// The maximum number of connections allowed.
+  max_connections: usize,
 }
 
 // ===== impl C2sListener =====
@@ -68,13 +71,26 @@ impl C2sListener {
   ///
   /// * `config` - The configuration for the C2S listener
   /// * `conn_mng` - The connection manager that will handle established connections
-  /// * `worker_threads` - The number of worker threads for the connection pool
+  /// * `conn_worker_threads` - The number of worker threads for the connection pool
   ///
   /// # Returns
   ///
   /// Returns a new `C2sListener` instance that is ready to be bootstrapped.
-  pub fn new(config: ListenerConfig, conn_mng: C2sConnManager, worker_threads: usize) -> Self {
-    Self { config, conn_mng, worker_pool: None, worker_threads, done_tx: None, local_address: None }
+  pub fn new(
+    config: ListenerConfig,
+    conn_mng: C2sConnManager,
+    conn_worker_threads: usize,
+    max_connections: usize,
+  ) -> Self {
+    Self {
+      config,
+      conn_mng,
+      worker_pool: None,
+      conn_worker_threads,
+      max_connections,
+      done_tx: None,
+      local_address: None,
+    }
   }
 
   /// Bootstraps the listener, starting to accept incoming connections.
@@ -97,7 +113,7 @@ impl C2sListener {
     self.conn_mng.bootstrap().await?;
 
     // Create the connection worker pool.
-    let worker_pool = ConnWorkerPool::new(self.worker_threads, self.conn_mng.clone())?;
+    let worker_pool = ConnWorkerPool::new(self.conn_worker_threads, self.conn_mng.clone(), self.max_connections)?;
     self.worker_pool = Some(worker_pool.clone());
 
     let (done_tx, mut done_rx) = mpsc::channel(1);

@@ -38,14 +38,17 @@ where
   /// The connection worker pool.
   worker_pool: Option<ConnWorkerPool<Stream, D, DF, ST>>,
 
-  /// The number of worker threads for the connection pool.
-  worker_threads: usize,
-
   /// The channel to signal the listener to stop.
   done_tx: Option<mpsc::Sender<()>>,
 
   /// The local address of the listener (only for TCP).
   local_address: Option<SocketAddr>,
+
+  /// The number of worker threads for the connection pool.
+  conn_worker_threads: usize,
+
+  /// The maximum number of connections allowed.
+  max_connections: usize,
 }
 
 // ===== impl Listener =====
@@ -62,13 +65,26 @@ where
   ///
   /// * `config` - The configuration for the listener
   /// * `conn_mng` - The connection manager that will handle established connections
-  /// * `worker_threads` - The number of worker threads for the connection pool
+  /// * `conn_worker_threads` - The number of worker threads for the connection pool
   ///
   /// # Returns
   ///
   /// Returns a new `Listener` instance that is ready to be bootstrapped.
-  pub fn new(config: ListenerConfig, conn_mng: ConnManager<D, DF, ST>, worker_threads: usize) -> Self {
-    Listener { config, conn_mng, worker_pool: None, worker_threads, done_tx: None, local_address: None }
+  pub fn new(
+    config: ListenerConfig,
+    conn_mng: ConnManager<D, DF, ST>,
+    conn_worker_threads: usize,
+    max_connections: usize,
+  ) -> Self {
+    Listener {
+      config,
+      conn_mng,
+      worker_pool: None,
+      conn_worker_threads,
+      done_tx: None,
+      local_address: None,
+      max_connections,
+    }
   }
 
   /// Starts the listener.
@@ -83,7 +99,7 @@ where
     conn_mng.bootstrap().await?;
 
     // Create the connection worker pool.
-    let worker_pool = ConnWorkerPool::new(self.worker_threads, conn_mng.clone())?;
+    let worker_pool = ConnWorkerPool::new(self.conn_worker_threads, conn_mng.clone(), self.max_connections)?;
     self.worker_pool = Some(worker_pool.clone());
 
     match self.config.network.as_str() {
