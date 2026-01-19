@@ -10,26 +10,15 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, trace, warn};
 
-use narwhal_common::conn::ConnWorkerPool;
+use narwhal_common::conn::{ConnWorkerPool, DispatcherFactory};
 use narwhal_common::service::{C2sService, Service};
 
 use crate::c2s::config::ListenerConfig;
+use crate::c2s::conn::{C2sConnManager, C2sConnWorkerPool, C2sDispatcherFactory};
+use crate::util;
 use crate::util::tls::{create_tls_config, generate_self_signed_cert};
-use crate::{c2s, util};
 
 const LOCALHOST_DOMAIN: &str = "localhost";
-
-/// The C2S connection manager.
-type C2sConnManager =
-  narwhal_common::conn::ConnManager<c2s::conn::C2sDispatcher, c2s::conn::C2sDispatcherFactory, C2sService>;
-
-/// The C2S connection worker pool type.
-type C2sConnWorkerPool = ConnWorkerPool<
-  tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-  c2s::conn::C2sDispatcher,
-  c2s::conn::C2sDispatcherFactory,
-  C2sService,
->;
 
 /// A TLS-enabled TCP listener for client-to-server (C2S) connections.
 ///
@@ -46,6 +35,9 @@ pub struct C2sListener {
   /// The connection manager.
   conn_mng: C2sConnManager,
 
+  /// The dispatcher factory.
+  dispatcher_factory: C2sDispatcherFactory,
+
   /// The connection worker pool.
   worker_pool: Option<C2sConnWorkerPool>,
 
@@ -57,9 +49,6 @@ pub struct C2sListener {
 
   /// The number of worker threads for the connection pool.
   conn_worker_threads: usize,
-
-  /// The maximum number of connections allowed.
-  max_connections: usize,
 }
 
 // ===== impl C2sListener =====
@@ -71,6 +60,7 @@ impl C2sListener {
   ///
   /// * `config` - The configuration for the C2S listener
   /// * `conn_mng` - The connection manager that will handle established connections
+  /// * `dispatcher_factory` - The dispatcher factory that will create new dispatchers
   /// * `conn_worker_threads` - The number of worker threads for the connection pool
   ///
   /// # Returns
@@ -79,15 +69,15 @@ impl C2sListener {
   pub fn new(
     config: ListenerConfig,
     conn_mng: C2sConnManager,
+    dispatcher_factory: C2sDispatcherFactory,
     conn_worker_threads: usize,
-    max_connections: usize,
   ) -> Self {
     Self {
       config,
       conn_mng,
+      dispatcher_factory,
       worker_pool: None,
       conn_worker_threads,
-      max_connections,
       done_tx: None,
       local_address: None,
     }
@@ -110,10 +100,12 @@ impl C2sListener {
     assert!(self.worker_pool.is_none());
 
     // Bootstrap the connection manager.
+    self.dispatcher_factory.bootstrap().await?;
     self.conn_mng.bootstrap().await?;
 
     // Create the connection worker pool.
-    let worker_pool = ConnWorkerPool::new(self.conn_worker_threads, self.conn_mng.clone(), self.max_connections)?;
+    let worker_pool =
+      ConnWorkerPool::new(self.conn_worker_threads, self.conn_mng.clone(), self.dispatcher_factory.clone())?;
     self.worker_pool = Some(worker_pool.clone());
 
     let (done_tx, mut done_rx) = mpsc::channel(1);
@@ -180,6 +172,7 @@ impl C2sListener {
 
     // Wait for the connection manager to stop.
     self.conn_mng.shutdown().await?;
+    self.dispatcher_factory.shutdown().await?;
 
     Ok(())
   }

@@ -93,8 +93,6 @@ pub async fn run(config_file: Option<String>, conn_worker_threads: usize) -> any
   let max_channels_per_client = c2s_config.limits.max_channels_per_client;
   let max_payload_size = c2s_config.limits.max_payload_size;
 
-  let max_connections = c2s_config.limits.max_connections as usize;
-
   let local_domain = StringAtom::from(c2s_config.listener.domain.as_str());
   let c2s_router = c2s::Router::new(local_domain.clone());
 
@@ -119,10 +117,10 @@ pub async fn run(config_file: Option<String>, conn_worker_threads: usize) -> any
   )
   .await?;
 
-  let c2s_conn_mng = c2s::conn::C2sConnManager::new(c2s_config.as_ref(), c2s_dispatcher_factory);
+  let c2s_conn_mng = c2s::conn::C2sConnManager::new(c2s_config.as_ref());
 
   let mut c2s_ln =
-    c2s::C2sListener::new(c2s_config.listener.clone(), c2s_conn_mng, conn_worker_threads, max_connections);
+    c2s::C2sListener::new(c2s_config.listener.clone(), c2s_conn_mng, c2s_dispatcher_factory, conn_worker_threads);
 
   // Start routing task for modulator private payloads.
   let mut route_m2s_payload_handle = Option::<(JoinHandle<()>, CancellationToken)>::None;

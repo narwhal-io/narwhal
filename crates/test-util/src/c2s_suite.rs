@@ -112,14 +112,9 @@ impl C2sSuite {
       rate_limit: arc_config.limits.rate_limit,
     };
 
-    let conn_mng = c2s::conn::C2sConnManager::new(conn_cfg, dispatcher_factory);
+    let conn_mng = c2s::conn::C2sConnManager::new(conn_cfg);
 
-    let ln = c2s::C2sListener::new(
-      arc_config.listener.clone(),
-      conn_mng.clone(),
-      1,
-      arc_config.limits.max_connections as usize,
-    );
+    let ln = c2s::C2sListener::new(arc_config.listener.clone(), conn_mng.clone(), dispatcher_factory, 1);
 
     Self {
       config: arc_config,

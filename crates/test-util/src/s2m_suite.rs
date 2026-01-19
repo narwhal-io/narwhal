@@ -30,14 +30,9 @@ impl<M: Modulator> S2mSuite<M> {
 
     let server_config = arc_config.server.clone();
 
-    let conn_mng = narwhal_modulator::conn::S2mConnManager::<M>::new(&server_config, dispatcher_factory);
+    let conn_mng = narwhal_modulator::conn::S2mConnManager::new(&server_config);
 
-    let ln = S2mListener::new(
-      server_config.listener.clone(),
-      conn_mng.clone(),
-      1,
-      server_config.limits.max_connections as usize,
-    );
+    let ln = S2mListener::new(server_config.listener.clone(), conn_mng.clone(), dispatcher_factory, 1);
 
     Self { config: arc_config, ln }
   }
