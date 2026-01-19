@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 use std::fmt::Debug;
-use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,8 +75,25 @@ pub struct M2sDispatcherFactoryInner {
 }
 
 /// A M2S dispatcher that handles incoming messages.
-#[derive(Debug, Default)]
-pub struct M2sDispatcher(Option<M2sDispatcherInner>);
+pub struct M2sDispatcher {
+  /// The dispatcher handler.
+  handler: usize,
+
+  /// The M2S server configuration.
+  config: Arc<M2sServerConfig>,
+
+  /// The connection transmitter.
+  tx: ConnTx,
+
+  /// The broadcast sender for outbound private payloads.
+  payload_tx: broadcast::Sender<OutboundPrivatePayload>,
+}
+
+impl Debug for M2sDispatcher {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("M2sDispatcher").field("handler", &self.handler).field("config", &self.config).finish()
+  }
+}
 
 // ===== impl M2sDispatcher =====
 
@@ -89,25 +105,7 @@ impl M2sDispatcher {
     tx: ConnTx,
     payload_tx: broadcast::Sender<OutboundPrivatePayload>,
   ) -> Self {
-    let inner = M2sDispatcherInner { handler, config, tx, payload_tx };
-
-    Self(Some(inner))
-  }
-}
-
-impl Deref for M2sDispatcher {
-  type Target = M2sDispatcherInner;
-
-  fn deref(&self) -> &Self::Target {
-    assert!(self.0.is_some(), "M2sDispatcherInner is not initialized");
-    self.0.as_ref().unwrap()
-  }
-}
-
-impl DerefMut for M2sDispatcher {
-  fn deref_mut(&mut self) -> &mut Self::Target {
-    assert!(self.0.is_some(), "M2sDispatcherInner is not initialized");
-    self.0.as_mut().unwrap()
+    Self { handler, config, tx, payload_tx }
   }
 }
 
@@ -288,26 +286,6 @@ impl M2sDispatcher {
   }
 }
 
-pub struct M2sDispatcherInner {
-  /// The dispatcher handler.
-  handler: usize,
-
-  /// The M2S server configuration.
-  config: Arc<M2sServerConfig>,
-
-  /// The connection transmitter.
-  tx: ConnTx,
-
-  /// The broadcast sender for outbound private payloads.
-  payload_tx: broadcast::Sender<OutboundPrivatePayload>,
-}
-
-impl Debug for M2sDispatcherInner {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct("M2sDispatcherInner").field("handler", &self.handler).field("config", &self.config).finish()
-  }
-}
-
 #[derive(Debug)]
 pub struct S2mDispatcherFactory<M: Modulator>(Arc<RwLock<S2mDispatcherFactoryInner<M>>>);
 
@@ -431,39 +409,30 @@ impl<M: Modulator> narwhal_common::conn::DispatcherFactory<S2mDispatcher<M>> for
 }
 
 /// A S2M dispatcher that handles incoming messages.
-#[derive(Debug)]
-pub struct S2mDispatcher<M: Modulator>(Option<S2mDispatcherInner<M>>);
+pub struct S2mDispatcher<M: Modulator> {
+  /// The dispatcher handler.
+  handler: usize,
 
-// ===== impl S2mDispatcher =====
-//
-impl<M: Modulator> Default for S2mDispatcher<M> {
-  fn default() -> Self {
-    Self(None)
+  /// The S2M server configuration.
+  config: Arc<S2mServerConfig>,
+
+  /// The modulator interface.
+  modulator: Arc<M>,
+
+  /// The connection transmitter.
+  tx: ConnTx,
+}
+
+impl<M: Modulator> Debug for S2mDispatcher<M> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("S2mDispatcher").field("handler", &self.handler).field("config", &self.config).finish()
   }
 }
 
 impl<M: Modulator> S2mDispatcher<M> {
   /// Initializes the dispatcher with the given parameters.
   pub fn new(handler: usize, config: Arc<S2mServerConfig>, modulator: Arc<M>, tx: ConnTx) -> Self {
-    let inner = S2mDispatcherInner { handler, config, modulator, tx };
-
-    Self(Some(inner))
-  }
-}
-
-impl<M: Modulator> Deref for S2mDispatcher<M> {
-  type Target = S2mDispatcherInner<M>;
-
-  fn deref(&self) -> &Self::Target {
-    assert!(self.0.is_some(), "S2mDispatcherInner is not initialized");
-    self.0.as_ref().unwrap()
-  }
-}
-
-impl<M: Modulator> DerefMut for S2mDispatcher<M> {
-  fn deref_mut(&mut self) -> &mut Self::Target {
-    assert!(self.0.is_some(), "S2mDispatcherInner is not initialized");
-    self.0.as_mut().unwrap()
+    S2mDispatcher { handler, config, modulator, tx }
   }
 }
 
@@ -855,25 +824,5 @@ impl<M: Modulator> S2mDispatcher<M> {
     trace!(handler = self.handler, id = params.id, "handled ForwardEvent message");
 
     Ok(())
-  }
-}
-
-pub struct S2mDispatcherInner<M: Modulator> {
-  /// The dispatcher handler.
-  handler: usize,
-
-  /// The S2M server configuration.
-  config: Arc<S2mServerConfig>,
-
-  /// The modulator interface.
-  modulator: Arc<M>,
-
-  /// The connection transmitter.
-  tx: ConnTx,
-}
-
-impl<M: Modulator> Debug for S2mDispatcherInner<M> {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct("S2mDispatcherInner").field("handler", &self.handler).field("config", &self.config).finish()
   }
 }

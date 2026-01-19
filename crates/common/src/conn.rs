@@ -5,7 +5,6 @@ use std::cell::UnsafeCell;
 use std::future::Future;
 use std::io::{Cursor, IoSlice};
 use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -83,7 +82,7 @@ pub enum State {
 ///
 /// Implementations must ensure state transitions only move forward, never backward.
 #[async_trait]
-pub trait Dispatcher: Default + Send + Sync + 'static {
+pub trait Dispatcher: Send + Sync + 'static {
   /// Processes an incoming message based on the current connection state.
   ///
   /// This method is the core of the message handling logic. It receives a message,
@@ -365,8 +364,11 @@ impl<ST: Service> ConnManager<ST> {
     Ok(())
   }
 
-  pub async fn run<S, D: Dispatcher, DF: DispatcherFactory<D>>(&self, mut stream: S, mut dispatcher_factory: DF)
-  where
+  pub async fn run_connection<S, D: Dispatcher, DF: DispatcherFactory<D>>(
+    &self,
+    mut stream: S,
+    mut dispatcher_factory: DF,
+  ) where
     S: AsyncRead + AsyncWrite + Unpin,
   {
     let inner = self.0.read().await;
@@ -397,8 +399,6 @@ impl<ST: Service> ConnManager<ST> {
     }
 
     // Create a new connection.
-    let mut conn = Box::new(Conn::default());
-
     let send_msg_channel_size = config.outbound_message_queue_size as usize;
 
     let (send_msg_tx, send_msg_rx) = channel(send_msg_channel_size);
@@ -410,7 +410,7 @@ impl<ST: Service> ConnManager<ST> {
 
     let dispatcher = dispatcher_factory.create(handler, tx.clone()).await;
 
-    conn.0 = Some(ConnInner {
+    let mut conn = Box::new(Conn {
       handler,
       config: config.clone(),
       state: State::Connecting,
@@ -435,7 +435,7 @@ impl<ST: Service> ConnManager<ST> {
 
     let rate_limit = config.rate_limit;
 
-    match ConnInner::<D>::run_connection::<S, ST>(
+    match Conn::<D>::run::<S, ST>(
       stream,
       &mut conn,
       handler,
@@ -464,30 +464,8 @@ impl<ST: Service> ConnManager<ST> {
 }
 
 /// A client connection.
-#[derive(Debug, Default)]
-pub struct Conn<D: Dispatcher>(Option<ConnInner<D>>);
-
-// ===== impl Conn =====
-
-impl<D: Dispatcher> Deref for Conn<D> {
-  type Target = ConnInner<D>;
-
-  fn deref(&self) -> &Self::Target {
-    assert!(self.0.is_some(), "ConnInner is not initialized");
-    self.0.as_ref().unwrap()
-  }
-}
-
-impl<D: Dispatcher> DerefMut for Conn<D> {
-  fn deref_mut(&mut self) -> &mut Self::Target {
-    assert!(self.0.is_some(), "ConnInner is not initialized");
-    self.0.as_mut().unwrap()
-  }
-}
-
-/// Inner connection fields.
 #[derive(Debug)]
-pub struct ConnInner<D: Dispatcher> {
+pub struct Conn<D: Dispatcher> {
   /// The connection configuration.
   config: Arc<Config>,
 
@@ -522,9 +500,9 @@ pub struct ConnInner<D: Dispatcher> {
   cancellation_token: CancellationToken,
 }
 
-// ===== impl ConnInner =====
+// ===== impl Conn =====
 
-impl<D: Dispatcher> ConnInner<D> {
+impl<D: Dispatcher> Conn<D> {
   async fn dispatch_message<ST: Service>(&mut self, msg: Message, payload: Option<PoolBuffer>) -> anyhow::Result<()> {
     let dispatcher = self.dispatcher.clone();
 
@@ -783,7 +761,7 @@ impl<D: Dispatcher> ConnInner<D> {
   }
 
   #[allow(clippy::too_many_arguments)]
-  async fn run_connection<T, ST>(
+  async fn run<T, ST>(
     stream: T,
     conn: &mut Conn<D>,
     handler: usize,
@@ -1513,7 +1491,7 @@ where
 
               worker_active_conns.fetch_add(1, Ordering::Relaxed);
 
-              conn_manager.run(stream, dispatcher_factory).await;
+              conn_manager.run_connection(stream, dispatcher_factory).await;
 
               worker_active_conns.fetch_sub(1, Ordering::Relaxed);
             });
