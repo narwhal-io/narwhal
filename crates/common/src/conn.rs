@@ -30,7 +30,6 @@ use narwhal_protocol::{ErrorParameters, Message, PingParameters, SerializeError,
 
 use narwhal_util::codec::{StreamReader, StreamReaderError};
 use narwhal_util::io::write_all_vectored;
-use narwhal_util::object_pool::ObjectPool;
 use narwhal_util::pool::{BucketedPool, MutablePoolBuffer, Pool, PoolBuffer};
 use narwhal_util::string_atom::StringAtom;
 
@@ -244,15 +243,15 @@ pub struct Config {
 }
 
 /// The connection manager inner state.
-struct ConnManagerInner<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> {
+struct ConnManagerInner<ST: Service> {
   /// The connection manager configuration.
   config: Arc<Config>,
 
   /// The next handler ID to assign.
   next_handler: Arc<AtomicUsize>,
 
-  /// The connection dispatcher factory.
-  dispatcher_factory: DF,
+  /// The number of active connections.
+  active_connections: Arc<AtomicU32>,
 
   /// The message buffer pool.
   message_buffer_pool: Pool,
@@ -267,15 +266,15 @@ struct ConnManagerInner<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> {
   shutdown_token: CancellationToken,
 
   /// Phantom data for the service type.
-  _phantom: PhantomData<(D, ST)>,
+  _phantom: PhantomData<ST>,
 }
 
-impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> std::fmt::Debug for ConnManagerInner<D, DF, ST> {
+impl<ST: Service> std::fmt::Debug for ConnManagerInner<ST> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("ConnManagerInner")
       .field("config", &self.config)
       .field("next_handler", &self.next_handler)
-      .field("dispatcher_factory", &"<dispatcher_factory>")
+      .field("active_connections", &self.active_connections)
       .field("message_buffer_pool", &self.message_buffer_pool)
       .field("payload_buffer_pool", &self.payload_buffer_pool)
       .field("task_tracker", &self.task_tracker)
@@ -286,19 +285,19 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> std::fmt::Debug for C
 
 /// The connection manager.
 #[derive(Debug)]
-pub struct ConnManager<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service>(Arc<RwLock<ConnManagerInner<D, DF, ST>>>);
+pub struct ConnManager<ST: Service>(Arc<RwLock<ConnManagerInner<ST>>>);
 
 // ===== impl ConnManager =====
 
-impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> Clone for ConnManager<D, DF, ST> {
+impl<ST: Service> Clone for ConnManager<ST> {
   fn clone(&self) -> Self {
     Self(self.0.clone())
   }
 }
 
-impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST> {
+impl<ST: Service> ConnManager<ST> {
   /// Creates a new connection manager.
-  pub fn new(config: impl Into<Config>, dispatcher_factory: DF) -> Self {
+  pub fn new(config: impl Into<Config>) -> Self {
     let conn_cfg = config.into();
 
     let max_connections = conn_cfg.max_connections as usize;
@@ -328,7 +327,7 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
     let inner = ConnManagerInner {
       config: Arc::new(conn_cfg),
       next_handler: Arc::new(AtomicUsize::new(1)),
-      dispatcher_factory,
+      active_connections: Arc::new(AtomicU32::new(0)),
       message_buffer_pool,
       payload_buffer_pool,
       task_tracker,
@@ -341,9 +340,7 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
 
   /// Bootstraps the connection manager.
   pub async fn bootstrap(&self) -> anyhow::Result<()> {
-    let mut inner = self.0.write().await;
-
-    inner.dispatcher_factory.bootstrap().await?;
+    let inner = self.0.read().await;
 
     info!(max_conns = inner.config.max_connections, service_type = ST::NAME, "connection manager started");
 
@@ -352,7 +349,7 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
 
   /// Shuts down the connection manager.
   pub async fn shutdown(&self) -> anyhow::Result<()> {
-    let mut inner = self.0.write().await;
+    let inner = self.0.read().await;
 
     // Notify the shutdown to all active connections.
     inner.shutdown_token.cancel();
@@ -361,16 +358,14 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
     inner.task_tracker.close();
     inner.task_tracker.wait().await;
 
-    inner.dispatcher_factory.shutdown().await?;
-
     info!(service_type = ST::NAME, "connection manager stopped");
 
     Ok(())
   }
 
-  pub async fn run<T>(&self, mut stream: T, conns: &ObjectPool<Conn<D>>)
+  pub async fn run<S, D: Dispatcher, DF: DispatcherFactory<D>>(&self, mut stream: S, mut dispatcher_factory: DF)
   where
-    T: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
   {
     let inner = self.0.read().await;
 
@@ -378,19 +373,19 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
     let message_buffer_pool = inner.message_buffer_pool.clone();
     let payload_buffer_pool = inner.payload_buffer_pool.clone();
     let next_handler = inner.next_handler.clone();
+    let active_connections = inner.active_connections.clone();
     let shutdown_token = inner.shutdown_token.clone();
-    let mut dispatcher_factory = inner.dispatcher_factory.clone();
 
     drop(inner);
 
-    // Acquire a connection.
-    let conn_opt = conns.get();
+    // Check if we've reached the maximum number of connections
+    let current_connections = active_connections.fetch_add(1, Ordering::SeqCst);
 
-    // If no connection is available, send an error message and return.
-    if conn_opt.is_none() {
+    if current_connections >= config.max_connections {
+      active_connections.fetch_sub(1, Ordering::SeqCst);
+
       let _ = stream.write_all(SERVER_OVERLOADED_ERROR).await;
       let _ = stream.flush().await;
-
       let _ = stream.shutdown().await;
 
       let max_conns = config.max_connections;
@@ -398,7 +393,9 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
 
       return;
     }
-    let mut conn = conn_opt.unwrap();
+
+    // Create a new connection.
+    let mut conn = Box::new(Conn::default());
 
     let send_msg_channel_size = config.outbound_message_queue_size as usize;
 
@@ -436,7 +433,7 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
 
     let rate_limit = config.rate_limit;
 
-    match ConnInner::<D>::run_connection::<T, ST>(
+    match ConnInner::<D>::run_connection::<S, ST>(
       stream,
       &mut conn,
       handler,
@@ -457,9 +454,8 @@ impl<D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnManager<D, DF, ST
       },
     }
 
-    // Reset the connection and return to pool
-    *conn = Conn::default();
-    conns.put(conn);
+    // Decrement the active connections counter
+    active_connections.fetch_sub(1, Ordering::SeqCst);
 
     trace!(handler = handler, service_type = ST::NAME, "connection deregistered");
   }
@@ -785,7 +781,7 @@ impl<D: Dispatcher> ConnInner<D> {
   #[allow(clippy::too_many_arguments)]
   async fn run_connection<T, ST>(
     stream: T,
-    conn: &mut Box<Conn<D>>,
+    conn: &mut Conn<D>,
     handler: usize,
     send_msg_rx: Receiver<(Message, Option<PoolBuffer>)>,
     close_rx: Receiver<Message>,
@@ -852,7 +848,7 @@ impl<D: Dispatcher> ConnInner<D> {
   async fn run_connection_loop<T, W, ST>(
     reader: ReadHalf<T>,
     writer: &mut W,
-    conn: &mut Box<Conn<D>>,
+    conn: &mut Conn<D>,
     handler: usize,
     mut send_msg_rx: Receiver<(Message, Option<PoolBuffer>)>,
     mut close_rx: Receiver<Message>,
@@ -1326,16 +1322,12 @@ where
   ///
   /// * `worker_count` - The number of workers to create in the pool
   /// * `conn_manager` - The connection manager to use for processing streams
-  /// * `max_connections` - The maximum number of connections the worker pool can handle
+  /// * `dispatcher_factory` - The dispatcher factory to use for creating dispatchers
   ///
   /// # Returns
   ///
   /// Returns a `ConnWorkerPool` instance or an error if worker creation fails.
-  pub fn new(
-    worker_count: usize,
-    conn_manager: ConnManager<D, DF, ST>,
-    max_connections: usize,
-  ) -> anyhow::Result<Self> {
+  pub fn new(worker_count: usize, conn_manager: ConnManager<ST>, dispatcher_factory: DF) -> anyhow::Result<Self> {
     // Get available CPU cores
     let core_ids = core_affinity::get_core_ids().ok_or_else(|| anyhow::anyhow!("failed to get core IDs"))?;
 
@@ -1346,11 +1338,9 @@ where
     // Create workers, assigning each to a core in round-robin fashion
     let mut workers = Vec::with_capacity(worker_count);
 
-    let worker_max_conns = max_connections / worker_count;
-
     for i in 0..worker_count {
       let core_id = core_ids[i % core_ids.len()];
-      let worker = ConnWorker::new(conn_manager.clone(), core_id, worker_max_conns)?;
+      let worker = ConnWorker::new(conn_manager.clone(), dispatcher_factory.clone(), core_id)?;
       workers.push(worker);
     }
 
@@ -1435,8 +1425,8 @@ where
   /// # Arguments
   ///
   /// * `conn_manager` - The connection manager to use for processing streams
+  /// * `dispatcher_factory` - The dispatcher factory to use for creating dispatchers
   /// * `affinity` - The CPU core ID to bind this worker thread to
-  /// * `worker_max_conns` - The maximum number of concurrent connections this worker can handle
   ///
   /// # Returns
   ///
@@ -1445,9 +1435,9 @@ where
   /// # Example
   ///
   /// ```ignore
-  /// let worker = ConnWorker::new(conn_manager, CoreId { id: 0 })?;
+  /// let worker = ConnWorker::new(conn_manager, dispatcher_factory, CoreId { id: 0 })?;
   /// ```
-  fn new(conn_manager: ConnManager<D, DF, ST>, affinity: CoreId, worker_max_conns: usize) -> anyhow::Result<Self> {
+  fn new(conn_manager: ConnManager<ST>, dispatcher_factory: DF, affinity: CoreId) -> anyhow::Result<Self> {
     let (tx, rx) = tokio::sync::mpsc::channel::<ConnProvider<S>>(CONN_QUEUE_SIZE);
 
     let active_streams = Arc::new(AtomicUsize::new(0));
@@ -1456,10 +1446,10 @@ where
     let handle = thread::spawn(move || {
       let _ = core_affinity::set_for_current(affinity);
 
-      Self::spawn_runtime(conn_manager, rx, active_streams_clone, worker_max_conns);
+      Self::spawn_runtime(conn_manager, dispatcher_factory, rx, active_streams_clone);
     });
 
-    Ok(ConnWorker { tx: Some(tx), handle: Some(handle), active_streams, _phantom: std::marker::PhantomData })
+    Ok(ConnWorker { tx: Some(tx), handle: Some(handle), active_streams, _phantom: PhantomData })
   }
 
   /// Returns the current number of active stream tasks being processed.
@@ -1490,10 +1480,10 @@ where
 
   /// Spawns a single-threaded async runtime associated to the worker thread.
   fn spawn_runtime(
-    conn_manager: ConnManager<D, DF, ST>,
+    conn_manager: ConnManager<ST>,
+    dispatcher_factory: DF,
     mut rx: tokio::sync::mpsc::Receiver<ConnProvider<S>>,
     active_streams: Arc<AtomicUsize>,
-    worker_max_conns: usize,
   ) {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
 
@@ -1502,12 +1492,11 @@ where
 
       local
         .run_until(async move {
-          let conn_pool = ObjectPool::<Conn<D>>::with_capacity(worker_max_conns);
-
           while let Some(stream_provider) = rx.recv().await {
             let conn_manager = conn_manager.clone();
-            let active_streams = active_streams.clone();
-            let conn_pool = conn_pool.clone();
+            let dispatcher_factory = dispatcher_factory.clone();
+
+            let worker_active_conns = active_streams.clone();
 
             tokio::task::spawn_local(async move {
               let stream = match stream_provider().await {
@@ -1518,11 +1507,11 @@ where
                 },
               };
 
-              active_streams.fetch_add(1, Ordering::Relaxed);
+              worker_active_conns.fetch_add(1, Ordering::Relaxed);
 
-              conn_manager.run(stream, &conn_pool).await;
+              conn_manager.run(stream, dispatcher_factory).await;
 
-              active_streams.fetch_sub(1, Ordering::Relaxed);
+              worker_active_conns.fetch_sub(1, Ordering::Relaxed);
             });
           }
         })

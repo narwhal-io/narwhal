@@ -33,7 +33,10 @@ where
   config: ListenerConfig,
 
   /// The connection manager.
-  conn_mng: ConnManager<D, DF, ST>,
+  conn_mng: ConnManager<ST>,
+
+  /// The dispatcher factory.
+  dispatcher_factory: DF,
 
   /// The connection worker pool.
   worker_pool: Option<ConnWorkerPool<Stream, D, DF, ST>>,
@@ -46,9 +49,6 @@ where
 
   /// The number of worker threads for the connection pool.
   conn_worker_threads: usize,
-
-  /// The maximum number of connections allowed.
-  max_connections: usize,
 }
 
 // ===== impl Listener =====
@@ -65,6 +65,7 @@ where
   ///
   /// * `config` - The configuration for the listener
   /// * `conn_mng` - The connection manager that will handle established connections
+  /// * `dispatcher_factory` - The dispatcher factory that will create dispatchers for new connections
   /// * `conn_worker_threads` - The number of worker threads for the connection pool
   ///
   /// # Returns
@@ -72,18 +73,18 @@ where
   /// Returns a new `Listener` instance that is ready to be bootstrapped.
   pub fn new(
     config: ListenerConfig,
-    conn_mng: ConnManager<D, DF, ST>,
+    conn_mng: ConnManager<ST>,
+    dispatcher_factory: DF,
     conn_worker_threads: usize,
-    max_connections: usize,
   ) -> Self {
     Listener {
       config,
       conn_mng,
+      dispatcher_factory,
       worker_pool: None,
       conn_worker_threads,
       done_tx: None,
       local_address: None,
-      max_connections,
     }
   }
 
@@ -95,11 +96,14 @@ where
     let (done_tx, done_rx) = mpsc::channel(1);
     self.done_tx = Some(done_tx);
 
+    let mut dispatcher_factory = self.dispatcher_factory.clone();
+    dispatcher_factory.bootstrap().await?;
+
     let conn_mng = self.conn_mng.clone();
     conn_mng.bootstrap().await?;
 
     // Create the connection worker pool.
-    let worker_pool = ConnWorkerPool::new(self.conn_worker_threads, conn_mng.clone(), self.max_connections)?;
+    let worker_pool = ConnWorkerPool::new(self.conn_worker_threads, conn_mng.clone(), dispatcher_factory.clone())?;
     self.worker_pool = Some(worker_pool.clone());
 
     match self.config.network.as_str() {
@@ -244,6 +248,7 @@ where
 
     // Wait for the connection manager to stop.
     self.conn_mng.shutdown().await?;
+    self.dispatcher_factory.shutdown().await?;
 
     Ok(())
   }

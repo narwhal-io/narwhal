@@ -39,10 +39,9 @@ impl M2sSuite {
 
     let server_config = (*arc_config).clone();
 
-    let conn_mng = narwhal_modulator::conn::M2sConnManager::new(&server_config, dispatcher_factory);
+    let conn_mng = narwhal_modulator::conn::M2sConnManager::new(&server_config);
 
-    let ln =
-      M2sListener::new(server_config.listener.clone(), conn_mng.clone(), 1, arc_config.limits.max_connections as usize);
+    let ln = M2sListener::new(server_config.listener.clone(), conn_mng.clone(), dispatcher_factory, 1);
 
     Self { config: arc_config, ln, payload_tx, payload_rx: Some(payload_rx) }
   }

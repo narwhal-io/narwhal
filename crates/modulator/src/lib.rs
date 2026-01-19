@@ -276,14 +276,9 @@ where
 
   let server_config = arc_config.server.clone();
 
-  let conn_mng = ConnManager::<conn::S2mDispatcher<M>, conn::S2mDispatcherFactory<M>, S2mService>::new(
-    &server_config,
-    dispatcher_factory,
-  );
+  let conn_mng = ConnManager::<S2mService>::new(&server_config);
 
-  let max_connections = arc_config.server.limits.max_connections as usize;
-
-  Ok(S2mListener::new(arc_config.server.listener.clone(), conn_mng, worker_threads, max_connections))
+  Ok(S2mListener::new(arc_config.server.listener.clone(), conn_mng, dispatcher_factory, worker_threads))
 }
 
 /// Creates an M2S listener.
@@ -309,12 +304,7 @@ pub async fn create_m2s_listener(
 
   let dispatcher_factory = conn::M2sDispatcherFactory::new(arc_config.clone(), payload_tx);
 
-  let conn_mng = ConnManager::<conn::M2sDispatcher, conn::M2sDispatcherFactory, M2sService>::new(
-    arc_config.as_ref(),
-    dispatcher_factory,
-  );
+  let conn_mng = ConnManager::<M2sService>::new(arc_config.as_ref());
 
-  let max_connections = arc_config.limits.max_connections as usize;
-
-  Ok(M2sListener::new(arc_config.listener.clone(), conn_mng, worker_threads, max_connections))
+  Ok(M2sListener::new(arc_config.listener.clone(), conn_mng, dispatcher_factory, worker_threads))
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tracing::{error, trace};
 
 use narwhal_common::conn::{ConnTx, State};
@@ -21,7 +21,6 @@ use narwhal_protocol::{
   AclAction, AclType, AuthAckParameters, ConnectAckParameters, IdentifyAckParameters, Message, ModDirectAckParameters,
 };
 use narwhal_protocol::{ChannelId, Nid};
-use narwhal_util::object_pool::ObjectPool;
 use narwhal_util::pool::PoolBuffer;
 use narwhal_util::string_atom::StringAtom;
 
@@ -30,7 +29,15 @@ use crate::channel::{ChannelConfig, ChannelManager};
 use crate::transmitter::{Resource, Transmitter};
 
 /// The C2S connection manager.
-pub type C2sConnManager = narwhal_common::conn::ConnManager<C2sDispatcher, C2sDispatcherFactory, C2sService>;
+pub type C2sConnManager = narwhal_common::conn::ConnManager<C2sService>;
+
+/// The C2S connection worker pool type.
+pub type C2sConnWorkerPool = narwhal_common::conn::ConnWorkerPool<
+  tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+  c2s::conn::C2sDispatcher,
+  c2s::conn::C2sDispatcherFactory,
+  C2sService,
+>;
 
 #[derive(Clone)]
 /// A transmitter implementation for C2S connections.
@@ -72,7 +79,7 @@ impl std::fmt::Debug for C2sTransmitter {
 }
 
 #[derive(Clone, Debug)]
-pub struct C2sDispatcherFactory(Arc<Mutex<C2sDispatcherFactoryInner>>);
+pub struct C2sDispatcherFactory(Arc<RwLock<C2sDispatcherFactoryInner>>);
 
 // ===== impl C2sDispatcherFactory =====
 
@@ -84,8 +91,6 @@ impl C2sDispatcherFactory {
     c2s_router: c2s::Router,
     modulator: Option<Arc<dyn Modulator>>,
   ) -> anyhow::Result<Self> {
-    let max_connections = config.limits.max_connections;
-
     let auth_required = {
       match modulator.as_ref() {
         Some(modulator) => modulator.operations().await?.contains(Operation::Auth),
@@ -93,24 +98,18 @@ impl C2sDispatcherFactory {
       }
     };
 
-    let dispatchers: ObjectPool<C2sDispatcher> = ObjectPool::with_capacity(max_connections as usize);
+    let inner = C2sDispatcherFactoryInner { config, channel_manager, c2s_router, modulator, auth_required };
 
-    let inner =
-      C2sDispatcherFactoryInner { config, channel_manager, c2s_router, modulator, dispatchers, auth_required };
-
-    Ok(Self(Arc::new(Mutex::new(inner))))
+    Ok(Self(Arc::new(RwLock::new(inner))))
   }
 }
 
 #[async_trait]
 impl narwhal_common::conn::DispatcherFactory<C2sDispatcher> for C2sDispatcherFactory {
   async fn create(&mut self, handler: usize, tx: ConnTx) -> Box<C2sDispatcher> {
-    let inner = self.0.lock().await;
+    let inner = self.0.read().await;
 
-    let dispatcher_opt = inner.dispatchers.get();
-    assert!(dispatcher_opt.is_some());
-
-    let mut dispatcher = dispatcher_opt.unwrap();
+    let mut dispatcher = C2sDispatcher::default();
 
     dispatcher.init(
       handler,
@@ -122,7 +121,7 @@ impl narwhal_common::conn::DispatcherFactory<C2sDispatcher> for C2sDispatcherFac
       tx,
     );
 
-    dispatcher
+    Box::new(dispatcher)
   }
 
   async fn bootstrap(&mut self) -> anyhow::Result<()> {
@@ -147,9 +146,6 @@ pub struct C2sDispatcherFactoryInner {
 
   /// The modulator, if any.
   modulator: Option<Arc<dyn Modulator>>,
-
-  /// The dispatcher pool.
-  dispatchers: ObjectPool<C2sDispatcher>,
 
   /// Whether authentication is required.
   auth_required: bool,
