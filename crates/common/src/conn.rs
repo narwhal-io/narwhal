@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 use core::fmt::Debug;
+use std::cell::UnsafeCell;
 use std::future::Future;
 use std::io::{Cursor, IoSlice};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
@@ -17,8 +19,8 @@ use core_affinity::CoreId;
 
 use rand::random;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf};
+use tokio::sync::RwLock;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{error, info, trace, warn};
@@ -170,8 +172,8 @@ pub trait DispatcherFactory<D: Dispatcher>: Clone + Send + Sync + 'static {
   ///
   /// # Returns
   ///
-  /// A boxed dispatcher instance, ready to handle messages for the new connection.
-  async fn create(&mut self, handler: usize, tx: ConnTx) -> Box<D>;
+  /// A dispatcher instance, ready to handle messages for the new connection.
+  async fn create(&mut self, handler: usize, tx: ConnTx) -> D;
 
   /// Bootstraps the dispatcher factory with initial configuration and resources.
   ///
@@ -412,7 +414,7 @@ impl<ST: Service> ConnManager<ST> {
       handler,
       config: config.clone(),
       state: State::Connecting,
-      dispatcher: Arc::new(Mutex::new(dispatcher)),
+      dispatcher: Rc::new(UnsafeCell::new(dispatcher)),
       task_tracker: TaskTracker::new(),
       cancellation_token: CancellationToken::new(),
       activity_counter: Arc::new(AtomicU64::new(0)),
@@ -496,7 +498,7 @@ pub struct ConnInner<D: Dispatcher> {
   state: State,
 
   /// The connection dispatcher.
-  dispatcher: Arc<Mutex<Box<D>>>,
+  dispatcher: Rc<UnsafeCell<D>>,
 
   /// The transmitter channels.
   tx: ConnTx,
@@ -542,9 +544,9 @@ impl<D: Dispatcher> ConnInner<D> {
         let tx = self.tx.clone();
 
         self.submit_request::<_, ST>(async move {
-          let mut dispatcher_guard = dispatcher.lock().await;
+          let dispatcher_ref = unsafe { &mut *dispatcher.get() };
 
-          match dispatcher_guard.dispatch_message(msg, payload, state).await {
+          match dispatcher_ref.dispatch_message(msg, payload, state).await {
             Ok(_) => {},
             Err(e) => {
               Self::notify_error::<ST>(e, tx, handler)?;
@@ -557,7 +559,9 @@ impl<D: Dispatcher> ConnInner<D> {
         self.activity_counter.fetch_add(1, Ordering::Relaxed);
       },
       _ => {
-        match dispatcher.lock().await.dispatch_message(msg, payload, self.state).await {
+        let dispatcher_ref = unsafe { &mut *dispatcher.get() };
+
+        match dispatcher_ref.dispatch_message(msg, payload, self.state).await {
           Ok(Some(new_state)) => {
             assert!(new_state >= self.state, "invalid state transition");
 
@@ -596,7 +600,7 @@ impl<D: Dispatcher> ConnInner<D> {
 
   fn submit_request<F, ST>(&mut self, future: F) -> anyhow::Result<()>
   where
-    F: Future<Output = anyhow::Result<()>> + Send + 'static,
+    F: Future<Output = anyhow::Result<()>> + 'static,
     ST: Service,
   {
     // First check if the maximum number of inflight requests has been reached,
@@ -741,7 +745,7 @@ impl<D: Dispatcher> ConnInner<D> {
 
   /// Bootstraps the connection.
   async fn bootstrap(&mut self) -> anyhow::Result<()> {
-    self.dispatcher.lock().await.bootstrap().await?;
+    unsafe { &mut *self.dispatcher.get() }.bootstrap().await?;
     Ok(())
   }
 
@@ -757,7 +761,7 @@ impl<D: Dispatcher> ConnInner<D> {
     self.task_tracker.wait().await;
 
     // Shutdown the dispatcher.
-    self.dispatcher.lock().await.shutdown().await?;
+    unsafe { &mut *self.dispatcher.get() }.shutdown().await?;
 
     Ok(())
   }
