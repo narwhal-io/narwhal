@@ -106,12 +106,10 @@ impl C2sDispatcherFactory {
 
 #[async_trait]
 impl narwhal_common::conn::DispatcherFactory<C2sDispatcher> for C2sDispatcherFactory {
-  async fn create(&mut self, handler: usize, tx: ConnTx) -> Box<C2sDispatcher> {
+  async fn create(&mut self, handler: usize, tx: ConnTx) -> C2sDispatcher {
     let inner = self.0.read().await;
 
-    let mut dispatcher = C2sDispatcher::default();
-
-    dispatcher.init(
+    C2sDispatcher::new(
       handler,
       inner.config.clone(),
       inner.auth_required,
@@ -119,9 +117,7 @@ impl narwhal_common::conn::DispatcherFactory<C2sDispatcher> for C2sDispatcherFac
       inner.channel_manager.clone(),
       inner.c2s_router.clone(),
       tx,
-    );
-
-    Box::new(dispatcher)
+    )
   }
 
   async fn bootstrap(&mut self) -> anyhow::Result<()> {
@@ -159,8 +155,7 @@ pub struct C2sDispatcher(Option<C2sDispatcherInner>);
 impl C2sDispatcher {
   /// Initializes the dispatcher with the given parameters.
   #[allow(clippy::too_many_arguments)]
-  pub fn init(
-    &mut self,
+  pub fn new(
     handler: usize,
     config: Arc<Config>,
     auth_required: bool,
@@ -168,7 +163,7 @@ impl C2sDispatcher {
     channel_manager: ChannelManager,
     c2s_router: c2s::Router,
     conn_tx: ConnTx,
-  ) {
+  ) -> Self {
     let inner = C2sDispatcherInner {
       config,
       channel_manager,
@@ -180,7 +175,7 @@ impl C2sDispatcher {
       auth_required,
     };
 
-    self.0 = Some(inner);
+    Self(Some(inner))
   }
 }
 

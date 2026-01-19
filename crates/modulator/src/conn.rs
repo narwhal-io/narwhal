@@ -51,14 +51,10 @@ impl M2sDispatcherFactory {
 
 #[async_trait::async_trait]
 impl narwhal_common::conn::DispatcherFactory<M2sDispatcher> for M2sDispatcherFactory {
-  async fn create(&mut self, handler: usize, tx: ConnTx) -> Box<M2sDispatcher> {
+  async fn create(&mut self, handler: usize, tx: ConnTx) -> M2sDispatcher {
     let inner = self.0.read().await;
 
-    let mut dispatcher = M2sDispatcher::default();
-
-    dispatcher.init(handler, inner.config.clone(), tx, inner.payload_tx.clone());
-
-    Box::new(dispatcher)
+    M2sDispatcher::new(handler, inner.config.clone(), tx, inner.payload_tx.clone())
   }
 
   async fn bootstrap(&mut self) -> anyhow::Result<()> {
@@ -87,16 +83,15 @@ pub struct M2sDispatcher(Option<M2sDispatcherInner>);
 
 impl M2sDispatcher {
   /// Initializes the M2S dispatcher with the given parameters.
-  pub fn init(
-    &mut self,
+  pub fn new(
     handler: usize,
     config: Arc<M2sServerConfig>,
     tx: ConnTx,
     payload_tx: broadcast::Sender<OutboundPrivatePayload>,
-  ) {
+  ) -> Self {
     let inner = M2sDispatcherInner { handler, config, tx, payload_tx };
 
-    self.0 = Some(inner);
+    Self(Some(inner))
   }
 }
 
@@ -390,14 +385,10 @@ impl<M: Modulator> S2mDispatcherFactory<M> {
 
 #[async_trait::async_trait]
 impl<M: Modulator> narwhal_common::conn::DispatcherFactory<S2mDispatcher<M>> for S2mDispatcherFactory<M> {
-  async fn create(&mut self, handler: usize, tx: ConnTx) -> Box<S2mDispatcher<M>> {
+  async fn create(&mut self, handler: usize, tx: ConnTx) -> S2mDispatcher<M> {
     let inner = self.0.read().await;
 
-    let mut dispatcher = S2mDispatcher::default();
-
-    dispatcher.init(handler, inner.config.clone(), inner.modulator.clone(), tx);
-
-    Box::new(dispatcher)
+    S2mDispatcher::new(handler, inner.config.clone(), inner.modulator.clone(), tx)
   }
 
   async fn bootstrap(&mut self) -> anyhow::Result<()> {
@@ -453,10 +444,10 @@ impl<M: Modulator> Default for S2mDispatcher<M> {
 
 impl<M: Modulator> S2mDispatcher<M> {
   /// Initializes the dispatcher with the given parameters.
-  pub fn init(&mut self, handler: usize, config: Arc<S2mServerConfig>, modulator: Arc<M>, tx: ConnTx) {
+  pub fn new(handler: usize, config: Arc<S2mServerConfig>, modulator: Arc<M>, tx: ConnTx) -> Self {
     let inner = S2mDispatcherInner { handler, config, modulator, tx };
 
-    self.0 = Some(inner);
+    Self(Some(inner))
   }
 }
 
