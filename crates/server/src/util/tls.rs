@@ -6,6 +6,7 @@ use std::{fs, io};
 
 use anyhow::anyhow;
 use rustls::ServerConfig;
+use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 /// Generates a self-signed certificate and private key.
@@ -46,6 +47,8 @@ pub fn generate_self_signed_cert(
 ///
 /// * `certs` - A `Vec<CertificateDer<'static>>` containing the server's certificate chain.
 /// * `key` - A `PrivateKeyDer<'static>` containing the server's private key.
+/// * `ktls_compat` - Optional kTLS compatibility info. When provided, configures TLS to prefer
+///   kTLS-compatible cipher suites.
 ///
 /// # Returns
 ///
@@ -54,8 +57,54 @@ pub fn generate_self_signed_cert(
 pub fn create_tls_config(
   certs: Vec<CertificateDer<'static>>,
   key: PrivateKeyDer<'static>,
+  ktls_compat: Option<&ktls::CompatibleCiphers>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  let config = ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key)?;
+  let builder = if let Some(compat) = ktls_compat {
+    // Build custom crypto provider with only kTLS-compatible cipher suites
+    let mut suites = Vec::new();
+
+    // Add TLS 1.3 cipher suites that are compatible with kTLS
+    if compat.tls13.aes_gcm_128 {
+      suites.push(rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256);
+    }
+    if compat.tls13.aes_gcm_256 {
+      suites.push(rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384);
+    }
+    if compat.tls13.chacha20_poly1305 {
+      suites.push(rustls::crypto::aws_lc_rs::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256);
+    }
+
+    // Add TLS 1.2 cipher suites that are compatible with kTLS
+    if compat.tls12.aes_gcm_128 {
+      suites.push(rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256);
+      suites.push(rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256);
+    }
+    if compat.tls12.aes_gcm_256 {
+      suites.push(rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384);
+      suites.push(rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384);
+    }
+    if compat.tls12.chacha20_poly1305 {
+      suites.push(rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256);
+      suites.push(rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256);
+    }
+
+    if suites.is_empty() {
+      return Err(anyhow!("No kTLS-compatible cipher suites available"));
+    }
+
+    let provider = CryptoProvider { cipher_suites: suites, ..rustls::crypto::aws_lc_rs::default_provider() };
+
+    ServerConfig::builder_with_provider(Arc::new(provider)).with_safe_default_protocol_versions()?.with_no_client_auth()
+  } else {
+    // Use default cipher suites
+    ServerConfig::builder().with_no_client_auth()
+  };
+
+  let mut config = builder.with_single_cert(certs, key)?;
+
+  // Enable secret extraction for kTLS support
+  config.enable_secret_extraction = true;
+
   Ok(Arc::new(config))
 }
 

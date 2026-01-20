@@ -33,7 +33,7 @@ pub type C2sConnManager = narwhal_common::conn::ConnManager<C2sService>;
 
 /// The C2S connection worker pool type.
 pub type C2sConnWorkerPool = narwhal_common::conn::ConnWorkerPool<
-  tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+  c2s::MaybeKtlsStream,
   c2s::conn::C2sDispatcher,
   c2s::conn::C2sDispatcherFactory,
   C2sService,

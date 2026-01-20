@@ -52,7 +52,7 @@ struct Cli {
   max_payload_size: usize,
 
   /// Number of worker threads to use
-  #[arg(short = 'w', long, default_value = "0")]
+  #[arg(short = 'w', long, default_value = "1")]
   worker_threads: usize,
 }
 

@@ -13,6 +13,7 @@ use tracing::{info, trace, warn};
 use narwhal_common::conn::{ConnWorkerPool, DispatcherFactory};
 use narwhal_common::service::{C2sService, Service};
 
+use crate::c2s::MaybeKtlsStream;
 use crate::c2s::config::ListenerConfig;
 use crate::c2s::conn::{C2sConnManager, C2sConnWorkerPool, C2sDispatcherFactory};
 use crate::util;
@@ -111,7 +112,41 @@ impl C2sListener {
     let (done_tx, mut done_rx) = mpsc::channel(1);
     self.done_tx = Some(done_tx);
 
-    let tls_config = self.load_tls_config()?;
+    // Auto-detect kTLS support (Linux)
+    #[cfg(target_os = "linux")]
+    let (enable_ktls, ktls_compat_opt) = match ktls::CompatibleCiphers::new().await {
+      Ok(compat) => {
+        // Check if at least one cipher is supported
+        let has_support = compat.tls13.aes_gcm_128
+          || compat.tls13.aes_gcm_256
+          || compat.tls13.chacha20_poly1305
+          || compat.tls12.aes_gcm_128
+          || compat.tls12.aes_gcm_256
+          || compat.tls12.chacha20_poly1305;
+
+        if has_support {
+          info!(service_type = C2sService::NAME, "kTLS support detected");
+          (true, Some(compat))
+        } else {
+          warn!(service_type = C2sService::NAME, "kTLS not available (no compatible ciphers), using userspace TLS");
+          (false, None)
+        }
+      },
+      Err(e) => {
+        warn!(
+          service_type = C2sService::NAME,
+          error = e.to_string(),
+          "kTLS capability detection failed, using userspace TLS"
+        );
+        (false, None)
+      },
+    };
+
+    #[cfg(not(target_os = "linux"))]
+    let (enable_ktls, ktls_compat_opt): (bool, Option<ktls::CompatibleCiphers>) = (false, None);
+
+    // Create TLS config
+    let tls_config = self.load_tls_config(ktls_compat_opt.as_ref())?;
     let acceptor = TlsAcceptor::from(tls_config);
 
     let mut listener = TcpListener::bind(self.get_address()).await?;
@@ -125,7 +160,7 @@ impl C2sListener {
 
       loop {
         tokio::select! {
-          _ = Self::accept_connection(&mut listener, acceptor.clone(), worker_pool.clone()) => {}
+          _ = Self::accept_connection(&mut listener, acceptor.clone(), worker_pool.clone(), enable_ktls) => {}
           _ = done_rx.recv() => {
             break;
           }
@@ -189,7 +224,7 @@ impl C2sListener {
     self.local_address
   }
 
-  fn load_tls_config(&self) -> anyhow::Result<Arc<ServerConfig>> {
+  fn load_tls_config(&self, ktls_compat: Option<&ktls::CompatibleCiphers>) -> anyhow::Result<Arc<ServerConfig>> {
     let is_localhost = self.config.domain == LOCALHOST_DOMAIN;
 
     if self.config.cert_file.is_empty() || self.config.key_file.is_empty() {
@@ -200,7 +235,7 @@ impl C2sListener {
 
       let (certs, key) = generate_self_signed_cert(vec![LOCALHOST_DOMAIN.to_string()])?;
 
-      return create_tls_config(certs, key);
+      return create_tls_config(certs, key, ktls_compat);
     }
     info!(
       domain = self.config.domain,
@@ -213,7 +248,7 @@ impl C2sListener {
     let certs = util::tls::load_certs(&self.config.cert_file)?;
     let key = util::tls::load_private_key(&self.config.key_file)?;
 
-    create_tls_config(certs, key)
+    create_tls_config(certs, key, ktls_compat)
   }
 
   fn get_address(&self) -> String {
@@ -224,6 +259,7 @@ impl C2sListener {
     listener: &mut TcpListener,
     acceptor: TlsAcceptor,
     worker_pool: C2sConnWorkerPool,
+    enable_ktls: bool,
   ) -> anyhow::Result<()> {
     let (tcp_stream, addr) = listener.accept().await?;
 
@@ -231,10 +267,32 @@ impl C2sListener {
 
     worker_pool
       .submit(move || async move {
-        // Negotiate the TLS connection.
-        let tls_stream = acceptor.accept(tcp_stream).await?;
+        // Try kTLS path
+        #[cfg(target_os = "linux")]
+        if enable_ktls {
+          let cork_stream = ktls::CorkStream::new(tcp_stream);
+          let tls_stream = acceptor.accept(cork_stream).await?;
 
-        Ok(tls_stream)
+          // Attempt kTLS
+          match ktls::config_ktls_server(tls_stream).await {
+            Ok(ktls_stream) => {
+              trace!(service_type = C2sService::NAME, "kTLS enabled for connection");
+              return Ok(MaybeKtlsStream::from_ktls(ktls_stream));
+            },
+            Err(e) => {
+              warn!(
+                service_type = C2sService::NAME,
+                error = ?e,
+                "kTLS configuration failed unexpectedly, connection dropped"
+              );
+              return Err(anyhow::anyhow!("kTLS configuration failed: {:?}", e));
+            },
+          }
+        }
+
+        // Regular TLS path
+        let tls_stream = acceptor.accept(tcp_stream).await?;
+        Ok(MaybeKtlsStream::from_tls(tls_stream))
       })
       .await;
 
