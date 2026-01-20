@@ -8,6 +8,7 @@ use narwhal_modulator::OutboundPrivatePayload;
 
 mod config;
 mod listener;
+mod stream;
 
 pub mod conn;
 pub mod router;
@@ -16,6 +17,7 @@ pub use config::Limits;
 pub use config::{Config, ListenerConfig};
 pub use listener::C2sListener;
 pub use router::Router;
+pub use stream::MaybeKtlsStream;
 
 // Re-export C2sClient from narwhal-client crate
 pub use narwhal_client::{C2sClient, C2sSessionExtraInfo};
