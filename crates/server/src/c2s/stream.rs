@@ -11,8 +11,8 @@ use tokio_rustls::server::TlsStream;
 /// A wrapper enum that can hold either a regular TLS stream or a kTLS-enabled stream.
 ///
 /// This allows the connection handling code to work with both types transparently,
-/// enabling kTLS optimization when available while falling back to userspace TLS
-/// when required.
+/// enabling kTLS optimization when available.
+#[allow(clippy::large_enum_variant)]
 pub enum MaybeKtlsStream {
   /// Regular userspace TLS stream using rustls
   Regular(TlsStream<TcpStream>),
