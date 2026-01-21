@@ -163,10 +163,19 @@ async fn test_c2s_max_connection_limit_reached() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(config);
   suite.setup().await?;
 
-  // Establish a first connection.
+  // Establish a first connection and complete the protocol handshake.
+  // This ensures the server has fully processed and counted the connection.
   let (tx, rx) = tokio::sync::oneshot::channel();
 
   let mut tls_socket = suite.tls_socket_connect().await?;
+
+  // Complete the CONNECT handshake to ensure connection is fully registered
+  tls_socket.write_message(Message::Connect(ConnectParameters { protocol_version: 1, heartbeat_interval: 0 })).await?;
+
+  let connect_ack = tls_socket.read_message().await?;
+  assert!(matches!(connect_ack, Message::ConnectAck { .. }));
+
+  // Spawn task to keep the connection alive
   tokio::spawn(async move {
     let _ = rx.await;
     tls_socket.shutdown().await.ok();
