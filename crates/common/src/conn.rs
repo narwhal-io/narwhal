@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 use core::fmt::Debug;
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::future::Future;
 use std::io::{Cursor, IoSlice};
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -249,7 +249,7 @@ struct ConnManagerInner<ST: Service> {
   config: Arc<Config>,
 
   /// The next handler ID to assign.
-  next_handler: Arc<AtomicUsize>,
+  next_handler: usize,
 
   /// The number of active connections.
   active_connections: Arc<AtomicU32>,
@@ -327,7 +327,7 @@ impl<ST: Service> ConnManager<ST> {
 
     let inner = ConnManagerInner {
       config: Arc::new(conn_cfg),
-      next_handler: Arc::new(AtomicUsize::new(1)),
+      next_handler: 1,
       active_connections: Arc::new(AtomicU32::new(0)),
       message_buffer_pool,
       payload_buffer_pool,
@@ -371,12 +371,15 @@ impl<ST: Service> ConnManager<ST> {
   ) where
     S: AsyncRead + AsyncWrite + Unpin,
   {
-    let inner = self.0.read().await;
+    let mut inner = self.0.write().await;
+
+    // Assign a unique handler
+    let handler = inner.next_handler;
+    inner.next_handler += 1;
 
     let config = inner.config.clone();
     let message_buffer_pool = inner.message_buffer_pool.clone();
     let payload_buffer_pool = inner.payload_buffer_pool.clone();
-    let next_handler = inner.next_handler.clone();
     let active_connections = inner.active_connections.clone();
     let shutdown_token = inner.shutdown_token.clone();
 
@@ -404,8 +407,6 @@ impl<ST: Service> ConnManager<ST> {
     let (send_msg_tx, send_msg_rx) = channel(send_msg_channel_size);
     let (close_tx, close_rx) = channel(1);
 
-    // Assign a unique handler
-    let handler = next_handler.fetch_add(1, Ordering::SeqCst);
     let tx = ConnTx { send_msg_tx, close_tx };
 
     let dispatcher = dispatcher_factory.create(handler, tx.clone()).await;
@@ -417,10 +418,10 @@ impl<ST: Service> ConnManager<ST> {
       dispatcher: Rc::new(UnsafeCell::new(dispatcher)),
       task_tracker: TaskTracker::new(),
       cancellation_token: CancellationToken::new(),
-      activity_counter: Arc::new(AtomicU64::new(0)),
+      activity_counter: Rc::new(Cell::new(0)),
       pong_notifier: None,
       scheduled_task: None,
-      inflight_requests: Arc::new(AtomicU32::new(0)),
+      inflight_requests: Rc::new(Cell::new(0)),
       tx,
     });
 
@@ -482,10 +483,10 @@ pub struct Conn<D: Dispatcher> {
   tx: ConnTx,
 
   /// Current number of inflight requests.
-  inflight_requests: Arc<AtomicU32>,
+  inflight_requests: Rc<Cell<u32>>,
 
   // Increments on every received message
-  activity_counter: Arc<AtomicU64>,
+  activity_counter: Rc<Cell<u64>>,
 
   // Channel to send PONG notifications to ping loop
   pong_notifier: Option<tokio::sync::mpsc::Sender<u32>>,
@@ -534,7 +535,8 @@ impl<D: Dispatcher> Conn<D> {
         })?;
 
         // Increment activity counter
-        self.activity_counter.fetch_add(1, Ordering::Relaxed);
+        let current = self.activity_counter.get();
+        self.activity_counter.set(current + 1);
       },
       _ => {
         let dispatcher_ref = unsafe { &mut *dispatcher.get() };
@@ -586,10 +588,8 @@ impl<D: Dispatcher> Conn<D> {
     let max_inflight_requests = self.config.max_inflight_requests;
     let inflight_requests = self.inflight_requests.clone();
 
-    let inc_res = inflight_requests.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-      if v <= max_inflight_requests { Some(v + 1) } else { None }
-    });
-    if inc_res.is_err() {
+    let current = inflight_requests.get();
+    if current > max_inflight_requests {
       return Err(
         narwhal_protocol::Error {
           id: None,
@@ -599,6 +599,7 @@ impl<D: Dispatcher> Conn<D> {
         .into(),
       );
     }
+    inflight_requests.set(current + 1);
 
     // Spawn the request task.
     let task_tracker = self.task_tracker.clone();
@@ -626,7 +627,8 @@ impl<D: Dispatcher> Conn<D> {
       }
 
       // Decrement the inflight requests counter.
-      inflight_requests.fetch_sub(1, Ordering::Relaxed);
+      let current = inflight_requests.get();
+      inflight_requests.set(current.saturating_sub(1));
     });
 
     Ok(())
@@ -659,12 +661,12 @@ impl<D: Dispatcher> Conn<D> {
     self.pong_notifier = Some(pong_tx);
 
     let ping_task = tokio::task::spawn_local(async move {
-      let mut last_check_counter = activity_counter.load(Ordering::Relaxed);
+      let mut last_check_counter = activity_counter.get();
 
       loop {
         tokio::time::sleep(heartbeat_interval).await;
 
-        let current_counter = activity_counter.load(Ordering::Relaxed);
+        let current_counter = activity_counter.get();
 
         if current_counter != last_check_counter {
           last_check_counter = current_counter;
@@ -680,7 +682,7 @@ impl<D: Dispatcher> Conn<D> {
           Ok(Some(pong_id)) if pong_id == ping_id => {
             trace!(id = ping_id, "pong received");
 
-            last_check_counter = activity_counter.load(Ordering::Relaxed);
+            last_check_counter = activity_counter.get();
           },
 
           // Wrong pong id
