@@ -82,7 +82,7 @@ pub enum State {
 ///
 /// Implementations must ensure state transitions only move forward, never backward.
 #[async_trait]
-pub trait Dispatcher: Send + Sync + 'static {
+pub trait Dispatcher: 'static {
   /// Processes an incoming message based on the current connection state.
   ///
   /// This method is the core of the message handling logic. It receives a message,
@@ -1393,7 +1393,8 @@ where
   active_streams: Arc<AtomicUsize>,
 
   /// Phantom data to maintain type parameters in the struct.
-  _phantom: std::marker::PhantomData<(D, DF, ST)>,
+  #[allow(clippy::type_complexity)]
+  _phantom: PhantomData<fn() -> (D, DF, ST)>,
 }
 
 impl<S, D: Dispatcher, DF: DispatcherFactory<D>, ST: Service> ConnWorker<S, D, DF, ST>
