@@ -8,6 +8,7 @@ All notable changes to Narwhal will be documented in this file.
 * [CHANGE]: Add `ResourceConflict` error for concurrent modification scenarios. [#109](https://github.com/narwhal-io/narwhal/pull/109)
 * [CHANGE]: Refactor ACL commands to support granular type-based operations. [#115](https://github.com/narwhal-io/narwhal/pull/115)
 * [CHANGE]: Add dedicated ACK messages for `SET_CHAN_ACL` and `SET_CHAN_CONFIG` operations. [#116](https://github.com/narwhal-io/narwhal/pull/116)
+* [CHANGE]: Migrate to runtime-agnostic primitives to enable future support for alternative async runtimes. [#140](https://github.com/narwhal-io/narwhal/pull/140)
 * [ENHANCEMENT]: Add kernel TLS (kTLS) support for TLS encryption offloading on Linux. [#136](https://github.com/narwhal-io/narwhal/pull/136)
 * [ENHANCEMENT]: Replace Slab with ObjectPool for simplified connection management. [#131](https://github.com/narwhal-io/narwhal/pull/131)
 * [ENHANCEMENT]: Distribute connections across CPU-pinned worker threads for improved performance. [#127](https://github.com/narwhal-io/narwhal/pull/127)
