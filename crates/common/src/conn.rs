@@ -19,10 +19,11 @@ use core_affinity::CoreId;
 use rand::random;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf};
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{error, info, trace, warn};
+
+use async_channel::{Receiver, Sender, TryRecvError, bounded};
 
 use narwhal_protocol::ErrorReason::{
   BadRequest, InternalServerError, OutboundQueueIsFull, PolicyViolation, ResponseTooLarge, ServerShuttingDown, Timeout,
@@ -404,8 +405,8 @@ impl<ST: Service> ConnManager<ST> {
     // Create a new connection.
     let send_msg_channel_size = config.outbound_message_queue_size as usize;
 
-    let (send_msg_tx, send_msg_rx) = channel(send_msg_channel_size);
-    let (close_tx, close_rx) = channel(1);
+    let (send_msg_tx, send_msg_rx) = bounded(send_msg_channel_size);
+    let (close_tx, close_rx) = bounded(1);
 
     let tx = ConnTx { send_msg_tx, close_tx };
 
@@ -489,7 +490,7 @@ pub struct Conn<D: Dispatcher> {
   activity_counter: Rc<Cell<u64>>,
 
   // Channel to send PONG notifications to ping loop
-  pong_notifier: Option<tokio::sync::mpsc::Sender<u32>>,
+  pong_notifier: Option<Sender<u32>>,
 
   /// Current scheduled task (ping or timeout).
   scheduled_task: Option<tokio::task::JoinHandle<()>>,
@@ -657,7 +658,7 @@ impl<D: Dispatcher> Conn<D> {
     let activity_counter = self.activity_counter.clone();
 
     // Create PONG notification channel
-    let (pong_tx, mut pong_rx) = tokio::sync::mpsc::channel::<u32>(1);
+    let (pong_tx, pong_rx) = bounded::<u32>(1);
     self.pong_notifier = Some(pong_tx);
 
     let ping_task = tokio::task::spawn_local(async move {
@@ -679,14 +680,14 @@ impl<D: Dispatcher> Conn<D> {
 
         // Wait for PONG or timeout
         match tokio::time::timeout(heartbeat_timeout, pong_rx.recv()).await {
-          Ok(Some(pong_id)) if pong_id == ping_id => {
+          Ok(Ok(pong_id)) if pong_id == ping_id => {
             trace!(id = ping_id, "pong received");
 
             last_check_counter = activity_counter.get();
           },
 
           // Wrong pong id
-          Ok(Some(_)) => {
+          Ok(Ok(_)) => {
             tx.close(Message::Error(ErrorParameters {
               id: None,
               reason: BadRequest.into(),
@@ -696,7 +697,7 @@ impl<D: Dispatcher> Conn<D> {
           },
 
           // Connection closing...
-          Ok(None) => {
+          Ok(Err(_)) => {
             break;
           },
 
@@ -834,8 +835,8 @@ impl<D: Dispatcher> Conn<D> {
     writer: &mut W,
     conn: &mut Conn<D>,
     handler: usize,
-    mut send_msg_rx: Receiver<(Message, Option<PoolBuffer>)>,
-    mut close_rx: Receiver<Message>,
+    send_msg_rx: Receiver<(Message, Option<PoolBuffer>)>,
+    close_rx: Receiver<Message>,
     shutdown_token: &CancellationToken,
     message_buffer_pool: Pool,
     payload_buffer_pool: BucketedPool,
@@ -990,13 +991,13 @@ impl<D: Dispatcher> Conn<D> {
           const MESSAGE_CHANNEL_CLOSED_LOG: &str = "message channel closed";
 
           match res {
-            Some((message, payload_opt)) => {
+            Ok((message, payload_opt)) => {
                 let message_buff = Self::serialize_message(&message, message_buffer_pool.acquire_buffer().await)?;
 
                 message_buffers_batch.push(message_buff);
                 payload_buffers_batch.push(payload_opt);
             }
-            None => {
+            Err(_) => {
               error!(handler = handler, service_type = ST::NAME, MESSAGE_CHANNEL_CLOSED_LOG);
               break 'connection_loop;
             }
@@ -1014,8 +1015,8 @@ impl<D: Dispatcher> Conn<D> {
                   message_buffers_batch.push(message_buff);
                   payload_buffers_batch.push(payload_opt);
               },
-              Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-              Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+              Err(TryRecvError::Empty) => break,
+              Err(TryRecvError::Closed) => {
                 error!(handler = handler, service_type = ST::NAME, MESSAGE_CHANNEL_CLOSED_LOG);
                 break 'connection_loop;
               }
@@ -1384,7 +1385,7 @@ where
   S: ConnStream,
 {
   /// Channel sender for submitting stream providers to the worker thread.
-  tx: Option<tokio::sync::mpsc::Sender<ConnProvider<S>>>,
+  tx: Option<Sender<ConnProvider<S>>>,
 
   /// Handle to the worker thread. Used to join the thread on shutdown.
   handle: Option<thread::JoinHandle<()>>,
@@ -1423,7 +1424,7 @@ where
   /// let worker = ConnWorker::new(conn_manager, dispatcher_factory, CoreId { id: 0 })?;
   /// ```
   fn new(conn_manager: ConnManager<ST>, dispatcher_factory: DF, affinity: CoreId) -> anyhow::Result<Self> {
-    let (tx, rx) = tokio::sync::mpsc::channel::<ConnProvider<S>>(CONN_QUEUE_SIZE);
+    let (tx, rx) = bounded::<ConnProvider<S>>(CONN_QUEUE_SIZE);
 
     let active_streams = Arc::new(AtomicUsize::new(0));
     let active_streams_clone = active_streams.clone();
@@ -1467,7 +1468,7 @@ where
   fn spawn_runtime(
     conn_manager: ConnManager<ST>,
     dispatcher_factory: DF,
-    mut rx: tokio::sync::mpsc::Receiver<ConnProvider<S>>,
+    rx: Receiver<ConnProvider<S>>,
     active_streams: Arc<AtomicUsize>,
   ) {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -1477,7 +1478,7 @@ where
 
       local
         .run_until(async move {
-          while let Some(stream_provider) = rx.recv().await {
+          while let Ok(stream_provider) = rx.recv().await {
             let conn_manager = conn_manager.clone();
             let dispatcher_factory = dispatcher_factory.clone();
 

@@ -5,9 +5,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::anyhow;
+use async_channel::{Receiver, Sender, bounded};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tracing::{info, trace};
 
 use narwhal_common::conn::{ConnManager, ConnWorkerPool, Dispatcher, DispatcherFactory};
@@ -42,7 +42,7 @@ where
   worker_pool: Option<ConnWorkerPool<Stream, D, DF, ST>>,
 
   /// The channel to signal the listener to stop.
-  done_tx: Option<mpsc::Sender<()>>,
+  done_tx: Option<Sender<()>>,
 
   /// The local address of the listener (only for TCP).
   local_address: Option<SocketAddr>,
@@ -93,7 +93,7 @@ where
     assert!(self.done_tx.is_none());
     assert!(self.worker_pool.is_none());
 
-    let (done_tx, done_rx) = mpsc::channel(1);
+    let (done_tx, done_rx) = bounded(1);
     self.done_tx = Some(done_tx);
 
     let mut dispatcher_factory = self.dispatcher_factory.clone();
@@ -128,7 +128,7 @@ where
   async fn listen_tcp(
     &mut self,
     worker_pool: ConnWorkerPool<Stream, D, DF, ST>,
-    mut done_rx: Receiver<()>,
+    done_rx: Receiver<()>,
   ) -> anyhow::Result<()> {
     let config = self.config.clone();
 
@@ -168,7 +168,7 @@ where
   async fn listen_unix(
     &self,
     worker_pool: ConnWorkerPool<Stream, D, DF, ST>,
-    mut done_rx: Receiver<()>,
+    done_rx: Receiver<()>,
   ) -> anyhow::Result<()> {
     let config = self.config.clone();
 
