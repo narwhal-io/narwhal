@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use futures::StreamExt;
+
 use futures::future::join_all;
 
 use narwhal_client::c2s::{AuthMethod, C2sClient, C2sConfig};
@@ -174,23 +174,23 @@ async fn spawn_inbound_drainers(
   let mut drainer_tasks = Vec::with_capacity(clients.len());
 
   for client in clients.iter() {
-    let mut inbound_stream = client.inbound_stream().await;
+    let inbound_stream = client.inbound_stream().await;
     let token_clone = cancel_token.clone();
 
     let drainer_task = tokio::spawn(async move {
       let mut count = 0u64;
       loop {
         tokio::select! {
-          msg = inbound_stream.next() => {
+          msg = inbound_stream.recv() => {
             match msg {
-              Some((message, _payload)) => {
+              Ok((message, _payload)) => {
                 match &message {
                     narwhal_protocol::Message::Error(err) => warn!("received error message: {:?}", err),
                     narwhal_protocol::Message::Message{ .. } => count += 1,
                     _ => {}
                 }
               },
-              None => break, // Stream ended naturally
+              Err(_) => break, // Channel closed
             }
           },
           _ = token_clone.cancelled() => {

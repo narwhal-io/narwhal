@@ -4,9 +4,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use async_channel::{Sender, bounded};
 use rustls::ServerConfig;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, trace, warn};
 
@@ -43,7 +44,7 @@ pub struct C2sListener {
   worker_pool: Option<C2sConnWorkerPool>,
 
   /// The channel to signal the listener to stop.
-  done_tx: Option<mpsc::Sender<()>>,
+  done_tx: Option<Sender<()>>,
 
   /// The local address of the listener.
   local_address: Option<SocketAddr>,
@@ -109,7 +110,7 @@ impl C2sListener {
       ConnWorkerPool::new(self.conn_worker_threads, self.conn_mng.clone(), self.dispatcher_factory.clone())?;
     self.worker_pool = Some(worker_pool.clone());
 
-    let (done_tx, mut done_rx) = mpsc::channel(1);
+    let (done_tx, done_rx) = bounded(1);
     self.done_tx = Some(done_tx);
 
     // Auto-detect kTLS support (Linux)

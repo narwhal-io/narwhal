@@ -9,16 +9,15 @@ use std::sync::{Arc, atomic};
 use std::time::Duration;
 
 use anyhow::anyhow;
+use async_channel::{Receiver, Sender, bounded};
 use deadpool::managed::Object;
 use deadpool::{Runtime, managed};
 use parking_lot::Mutex as PlMutex;
 use parking_lot::RwLock as PlRwLock;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::Semaphore;
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, mpsc, oneshot};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, oneshot};
 use tokio::task::JoinHandle;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, trace, warn};
@@ -260,10 +259,9 @@ where
   /// # Panics
   ///
   /// Panics if called more than once on the same `Client` instance.
-  pub async fn inbound_stream(&self) -> ReceiverStream<(Message, Option<PoolBuffer>)> {
+  pub async fn inbound_stream(&self) -> Receiver<(Message, Option<PoolBuffer>)> {
     let mut inner = self.0.lock().await;
-    let rx = inner.inbound_rx.take().expect("inbound_stream can only be called once");
-    ReceiverStream::new(rx)
+    inner.inbound_rx.take().expect("inbound_stream can only be called once")
   }
 }
 
@@ -294,10 +292,10 @@ where
   handshaker: HS,
 
   /// Sender for inbound messages.
-  inbound_tx: mpsc::Sender<(Message, Option<PoolBuffer>)>,
+  inbound_tx: Sender<(Message, Option<PoolBuffer>)>,
 
   /// Receiver for inbound messages.
-  inbound_rx: Option<mpsc::Receiver<(Message, Option<PoolBuffer>)>>,
+  inbound_rx: Option<Receiver<(Message, Option<PoolBuffer>)>>,
 
   /// Single persistent connection (lazily initialized).
   conn: Option<Arc<ClientConn<S, HS, ST>>>,
@@ -337,7 +335,7 @@ where
     let arc_client_id = Arc::new(client_id.into());
     let arc_config = Arc::new(config);
 
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(INBOUND_QUEUE_SIZE);
+    let (inbound_tx, inbound_rx) = bounded(INBOUND_QUEUE_SIZE);
 
     Ok(Self {
       client_id: arc_client_id,
@@ -366,7 +364,7 @@ where
     let arc_client_id = Arc::new(client_id.into());
     let arc_config = Arc::new(config);
 
-    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(INBOUND_QUEUE_SIZE);
+    let (inbound_tx, inbound_rx) = bounded(INBOUND_QUEUE_SIZE);
 
     let conn_pool = managed::Pool::builder(ClientConnManager::new(
       arc_client_id.clone(),
@@ -527,7 +525,7 @@ where
   handshaker: HS,
 
   /// The inbound message sender.
-  inbound_tx: mpsc::Sender<(Message, Option<PoolBuffer>)>,
+  inbound_tx: Sender<(Message, Option<PoolBuffer>)>,
 
   /// Phantom data for the service type.
   _service_type: std::marker::PhantomData<ST>,
@@ -544,7 +542,7 @@ where
     config: Arc<Config>,
     dialer: Arc<dyn Dialer<Stream = S>>,
     handshaker: HS,
-    inbound_tx: mpsc::Sender<(Message, Option<PoolBuffer>)>,
+    inbound_tx: Sender<(Message, Option<PoolBuffer>)>,
   ) -> Self {
     Self {
       client_id,
@@ -723,7 +721,7 @@ where
   handshaker: HS,
 
   /// The inbound message sender.
-  inbound_tx: mpsc::Sender<(Message, Option<PoolBuffer>)>,
+  inbound_tx: Sender<(Message, Option<PoolBuffer>)>,
 
   /// The session information after the handshake is completed.
   session_info: Option<(SessionInfo, HS::SessionExtraInfo)>,
@@ -735,7 +733,7 @@ where
   pending_requests: PendingRequests,
 
   /// The sender for the writer task.
-  writer_tx: Option<mpsc::Sender<(Message, Option<PoolBuffer>)>>,
+  writer_tx: Option<Sender<(Message, Option<PoolBuffer>)>>,
 
   /// Connection task tracker.
   task_tracker: TaskTracker,
@@ -764,7 +762,7 @@ where
     config: Arc<Config>,
     dialer: Arc<dyn Dialer<Stream = S>>,
     handshaker: HS,
-    inbound_tx: mpsc::Sender<(Message, Option<PoolBuffer>)>,
+    inbound_tx: Sender<(Message, Option<PoolBuffer>)>,
   ) -> Self {
     let task_tracker = TaskTracker::new();
     let shutdown_token = CancellationToken::new();
@@ -823,7 +821,7 @@ where
 
     let (rh, wh) = tokio::io::split(stream);
 
-    let (writer_tx, writer_rx) = mpsc::channel::<(Message, Option<PoolBuffer>)>(OUTBOUND_QUEUE_SIZE);
+    let (writer_tx, writer_rx) = bounded::<(Message, Option<PoolBuffer>)>(OUTBOUND_QUEUE_SIZE);
     task_tracker.spawn(Self::writer_task(
       self.client_id.clone(),
       self.conn_id,
@@ -899,7 +897,7 @@ where
     message: Message,
     payload_opt: Option<PoolBuffer>,
     pending_requests: PendingRequests,
-    writer_tx: mpsc::Sender<(Message, Option<PoolBuffer>)>,
+    writer_tx: Sender<(Message, Option<PoolBuffer>)>,
     inflight_requests_sem: Arc<Semaphore>,
   ) -> anyhow::Result<(Message, Option<PoolBuffer>)> {
     // First, check if the message has a correlation ID.
@@ -945,7 +943,7 @@ where
     client_id: Arc<String>,
     conn_id: u32,
     mut wh: WriteHalf<S>,
-    mut rx: Receiver<(Message, Option<PoolBuffer>)>,
+    rx: Receiver<(Message, Option<PoolBuffer>)>,
     mut message_buff: MutablePoolBuffer,
     error_state: ErrorState,
     shutdown_token: CancellationToken,
@@ -956,9 +954,9 @@ where
     loop {
       tokio::select! {
         // Write the message to the stream.
-        msg_opt = rx.recv() => {
-          match msg_opt {
-            Some((msg, payload_opt)) => {
+        msg_res = rx.recv() => {
+          match msg_res {
+            Ok((msg, payload_opt)) => {
               match Self::write_message(&msg, payload_opt, &mut wh, message_buff.as_mut_slice()).await {
                 Ok(_) => {},
                 Err(e) => {
@@ -968,8 +966,8 @@ where
                 },
               }
             }
-            None => {
-              // The receiver has been closed, exit the loop.
+            Err(_) => {
+              // All senders have been dropped, exit the loop.
               break;
             }
           }
@@ -1003,8 +1001,8 @@ where
     payload_buffer_pool: Pool,
     pending_requests: PendingRequests,
     error_state: ErrorState,
-    writer_tx: mpsc::Sender<(Message, Option<PoolBuffer>)>,
-    inbound_tx: mpsc::Sender<(Message, Option<PoolBuffer>)>,
+    writer_tx: Sender<(Message, Option<PoolBuffer>)>,
+    inbound_tx: Sender<(Message, Option<PoolBuffer>)>,
     shutdown_token: CancellationToken,
     payload_read_timeout: Duration,
   ) where

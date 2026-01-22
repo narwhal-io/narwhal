@@ -10,8 +10,8 @@ use anyhow::anyhow;
 use serde_derive::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
-use tokio_stream::wrappers::ReceiverStream;
 
+use async_channel::Receiver;
 use narwhal_common::client::{self, Handshaker, SessionInfo};
 use narwhal_common::service::C2sService;
 use narwhal_protocol::{
@@ -626,7 +626,7 @@ impl C2sClient {
   /// # Panics
   ///
   /// Panics if called more than once on the same `Client` instance.
-  pub async fn inbound_stream(&self) -> ReceiverStream<(Message, Option<PoolBuffer>)> {
+  pub async fn inbound_stream(&self) -> Receiver<(Message, Option<PoolBuffer>)> {
     self.client.inbound_stream().await
   }
 }
