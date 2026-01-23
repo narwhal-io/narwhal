@@ -3,8 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use async_lock::RwLock;
 use dashmap::DashMap;
-use tokio::sync::RwLock;
 
 use narwhal_protocol::ErrorReason::{
   BadRequest, ChannelIsFull, ChannelNotFound, Forbidden, NotAllowed, NotImplemented, PolicyViolation, ResourceConflict,

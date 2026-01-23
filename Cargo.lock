@@ -125,6 +125,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-lock"
+version = "3.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "290f7f2596bd5b78a9fec8088ccd89180d7f9f55b94b0576823bbbdc72ee8311"
+dependencies = [
+ "event-listener",
+ "event-listener-strategy",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1054,6 +1065,7 @@ name = "narwhal-benchmark"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "async-lock",
  "clap",
  "futures",
  "hdrhistogram",
@@ -1101,6 +1113,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "async-lock",
  "async-trait",
  "core_affinity",
  "deadpool",
@@ -1121,6 +1134,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "async-lock",
  "async-trait",
  "deadpool",
  "humantime-serde",
@@ -1163,6 +1177,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "async-lock",
  "async-trait",
  "clap",
  "console-subscriber",
@@ -1218,6 +1233,7 @@ name = "narwhal-util"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "async-lock",
  "async-trait",
  "bytes",
  "crossbeam-queue",

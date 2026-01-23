@@ -10,13 +10,14 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use async_channel::{Receiver, Sender, bounded};
+use async_lock::Mutex;
 use deadpool::managed::Object;
 use deadpool::{Runtime, managed};
 use parking_lot::Mutex as PlMutex;
 use parking_lot::RwLock as PlRwLock;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::Semaphore;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;

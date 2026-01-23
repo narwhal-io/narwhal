@@ -4,8 +4,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_lock::RwLock;
 use async_trait::async_trait;
-use tokio::sync::RwLock;
 use tracing::{error, trace};
 
 use narwhal_common::conn::{ConnTx, State};
