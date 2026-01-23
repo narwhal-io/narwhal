@@ -531,8 +531,8 @@ async fn test_c2s_modulator_broadcast_payload_alteration() -> anyhow::Result<()>
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_c2s_modulator_forward_event() -> anyhow::Result<()> {
+  use async_lock::Mutex;
   use narwhal_protocol::Event;
-  use tokio::sync::Mutex;
 
   // Create a modulator that captures events and logs any calls
   let captured_events = Arc::new(Mutex::new(Vec::new()));

@@ -18,12 +18,12 @@ use core_affinity::CoreId;
 
 use rand::random;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf};
-use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{error, info, trace, warn};
 
 use async_channel::{Receiver, Sender, TryRecvError, bounded};
+use async_lock::RwLock;
 
 use narwhal_protocol::ErrorReason::{
   BadRequest, InternalServerError, OutboundQueueIsFull, PolicyViolation, ResponseTooLarge, ServerShuttingDown, Timeout,

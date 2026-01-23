@@ -10,13 +10,13 @@ use clap::Parser;
 
 use futures::future::join_all;
 
+use async_lock::Mutex;
 use narwhal_client::c2s::{AuthMethod, C2sClient, C2sConfig};
 use narwhal_protocol::Nid;
 use narwhal_protocol::{AclAction, AclType, QoS};
 use narwhal_util::pool::Pool;
 use narwhal_util::string_atom::StringAtom;
 use rand::prelude::*;
-use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};

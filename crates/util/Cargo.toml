@@ -6,6 +6,7 @@ license = "BSD-3-Clause"
 
 [dependencies]
 anyhow = "1.0.100"
+async-lock = "3.4"
 async-trait = "0.1.88"
 bytes = "1.10.1"
 crossbeam-queue = "0.3.1"

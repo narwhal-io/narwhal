@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Ok;
-use tokio::sync::{RwLock, broadcast};
+use async_lock::RwLock;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, trace, warn};
 
