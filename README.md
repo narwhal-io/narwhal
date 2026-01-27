@@ -38,7 +38,7 @@ Each Narwhal server connects to exactly **one modulator**, ensuring consistent a
 
 ## 🎬 Demo
 
-https://github.com/user-attachments/assets/34baf7d3-4cfa-440d-a6e4-89cb94e922d3
+https://github.com/user-attachments/assets/bda491a0-a51b-4aaf-9ec8-3b3e7948d5ce
 
 ## Features
 
