@@ -10,6 +10,7 @@ async-channel = "2.3.1"
 async-lock = "3.4.2"
 async-trait = "0.1.88"
 core_affinity = "0.8.1"
+futures-channel = "0.3.31"
 deadpool =  {  version = "0.12.3", features = ["rt_tokio_1"] }
 futures = "0.3.31"
 tokio = { version = "1.48.0", features = ["io-util", "macros", "net", "time"] }

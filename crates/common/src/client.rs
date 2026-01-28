@@ -10,14 +10,13 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use async_channel::{Receiver, Sender, bounded};
-use async_lock::Mutex;
+use async_lock::{Mutex, Semaphore, SemaphoreGuardArc};
 use deadpool::managed::Object;
 use deadpool::{Runtime, managed};
+use futures_channel::oneshot;
 use parking_lot::Mutex as PlMutex;
 use parking_lot::RwLock as PlRwLock;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::sync::Semaphore;
-use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -670,7 +669,7 @@ struct PendingRequest {
   sender: Option<ResponseSender>,
 
   /// The owned semaphore permit for inflight requests.
-  _permit: OwnedSemaphorePermit,
+  _permit: SemaphoreGuardArc,
 }
 
 #[derive(Clone)]
@@ -910,10 +909,7 @@ where
     };
 
     // Acquire a permit from the semaphore.
-    let permit = inflight_requests_sem
-      .acquire_owned()
-      .await
-      .map_err(|_| anyhow!("failed to acquire semaphore permit for inflight requests"))?;
+    let permit = inflight_requests_sem.acquire_arc().await;
 
     // Create response channels.
     let (resp_tx, resp_rx) = oneshot::channel();
