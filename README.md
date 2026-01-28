@@ -193,10 +193,11 @@ If you're interested in using Narwhal in production, we encourage you to get inv
 
 We're actively working on expanding Narwhal's capabilities. Here are some features planned for future releases:
 
-- **Federation Support**: Enable multiple Narwhal servers to communicate and share messages across distributed deployments, allowing for horizontal scaling and multi-region architectures
+- **Message Persistence**: Durable message storage for reliable message delivery
 - **Enhanced Observability**: Built-in metrics, tracing, and monitoring capabilities
-- **Additional Protocol Transports**: Support for WebSocket and other transport layers
 - **Performance Optimizations**: Continued improvements to throughput and latency
+- **Additional Protocol Transports**: Support for WebSocket and other transport layers
+- **Federation Support**: Enable multiple Narwhal servers to communicate and share messages across distributed deployments, allowing for horizontal scaling and multi-region architectures
 
 ## Contributing
 
