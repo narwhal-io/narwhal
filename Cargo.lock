@@ -1118,6 +1118,7 @@ dependencies = [
  "core_affinity",
  "deadpool",
  "futures",
+ "futures-channel",
  "narwhal-protocol",
  "narwhal-util",
  "parking_lot",
