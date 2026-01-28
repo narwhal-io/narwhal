@@ -16,8 +16,8 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use core_affinity::CoreId;
 
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use rand::random;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{error, info, trace, warn};
@@ -394,7 +394,7 @@ impl<ST: Service> ConnManager<ST> {
 
       let _ = stream.write_all(SERVER_OVERLOADED_ERROR).await;
       let _ = stream.flush().await;
-      let _ = stream.shutdown().await;
+      let _ = stream.close().await;
 
       let max_conns = config.max_connections;
       warn!(max_conns, service_type = ST::NAME, "max connections limit reached");
@@ -781,7 +781,7 @@ impl<D: Dispatcher> Conn<D> {
     T: AsyncRead + AsyncWrite + Unpin,
     ST: Service,
   {
-    let (reader, mut writer) = tokio::io::split(stream);
+    let (reader, mut writer) = AsyncReadExt::split(stream);
 
     // Bootstrap the connection.
     conn.bootstrap().await?;
@@ -810,7 +810,7 @@ impl<D: Dispatcher> Conn<D> {
     // Shutdown the connection.
     let shutdown_result = conn.shutdown().await;
 
-    match writer.shutdown().await {
+    match writer.close().await {
       Ok(_) => {},
       Err(e) => {
         // Ignore expected socket disconnection errors that occur when client disconnects abruptly
@@ -831,7 +831,7 @@ impl<D: Dispatcher> Conn<D> {
 
   #[allow(clippy::too_many_arguments)]
   async fn run_connection_loop<T, W, ST>(
-    reader: ReadHalf<T>,
+    reader: futures::io::ReadHalf<T>,
     writer: &mut W,
     conn: &mut Conn<D>,
     handler: usize,
@@ -1151,7 +1151,7 @@ impl<D: Dispatcher> Conn<D> {
 
   async fn read_payload<T>(
     buffer: &mut [u8],
-    stream_reader: &mut StreamReader<ReadHalf<T>>,
+    stream_reader: &mut StreamReader<futures::io::ReadHalf<T>>,
     correlation_id: Option<u32>,
   ) -> anyhow::Result<()>
   where

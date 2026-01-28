@@ -6,11 +6,12 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use anyhow::anyhow;
+use futures::io::{AsyncRead, AsyncWrite};
 use rustls::ClientConfig;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
+use tokio_util::compat::TokioAsyncReadCompatExt;
 
 /// A unified stream type that can represent either TCP or Unix domain socket connections.
 ///
@@ -19,23 +20,31 @@ use tokio_rustls::client::TlsStream;
 ///
 /// The implementation delegates all I/O operations to the underlying stream type,
 /// maintaining their respective characteristics and behaviors.
-#[derive(Debug)]
 pub enum Stream {
   /// A TCP network connection.
   ///
   /// Used for remote connections over IP networks.
-  Tcp(TcpStream),
+  Tcp(tokio_util::compat::Compat<TcpStream>),
 
   /// A Unix domain socket connection.
   ///
   /// Used for high-performance local inter-process communication.
-  Unix(UnixStream),
+  Unix(tokio_util::compat::Compat<UnixStream>),
+}
+
+impl std::fmt::Debug for Stream {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Stream::Tcp(_) => f.debug_tuple("Stream::Tcp").field(&"<TcpStream>").finish(),
+      Stream::Unix(_) => f.debug_tuple("Stream::Unix").field(&"<UnixStream>").finish(),
+    }
+  }
 }
 
 // ===== impl Stream =====
 
 impl AsyncRead for Stream {
-  fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+  fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
     match self.get_mut() {
       Stream::Tcp(stream) => Pin::new(stream).poll_read(cx, buf),
       Stream::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
@@ -58,10 +67,10 @@ impl AsyncWrite for Stream {
     }
   }
 
-  fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+  fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     match self.get_mut() {
-      Stream::Tcp(stream) => Pin::new(stream).poll_shutdown(cx),
-      Stream::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
+      Stream::Tcp(stream) => Pin::new(stream).poll_close(cx),
+      Stream::Unix(stream) => Pin::new(stream).poll_close(cx),
     }
   }
 }
@@ -110,7 +119,7 @@ impl Dialer for TcpDialer {
 
     tcp_stream.set_nodelay(true)?;
 
-    Ok(Stream::Tcp(tcp_stream))
+    Ok(Stream::Tcp(tcp_stream.compat()))
   }
 }
 
@@ -138,7 +147,7 @@ impl Dialer for UnixDialer {
       .await
       .map_err(|e| anyhow!("failed to connect to {}: {}", self.socket_path, e))?;
 
-    Ok(Stream::Unix(unix_stream))
+    Ok(Stream::Unix(unix_stream.compat()))
   }
 }
 
@@ -225,9 +234,9 @@ impl TlsDialer {
 
 #[async_trait::async_trait]
 impl Dialer for TlsDialer {
-  type Stream = TlsStream<TcpStream>;
+  type Stream = tokio_util::compat::Compat<TlsStream<TcpStream>>;
 
-  async fn dial(&self) -> anyhow::Result<TlsStream<TcpStream>> {
+  async fn dial(&self) -> anyhow::Result<tokio_util::compat::Compat<TlsStream<TcpStream>>> {
     let tcp_stream =
       TcpStream::connect(&self.address).await.map_err(|e| anyhow!("failed to connect to {}: {}", self.address, e))?;
 
@@ -239,7 +248,7 @@ impl Dialer for TlsDialer {
       .await
       .map_err(|e| anyhow!("TLS handshake failed: {}", e))?;
 
-    Ok(tls_stream)
+    Ok(tls_stream.compat())
   }
 }
 

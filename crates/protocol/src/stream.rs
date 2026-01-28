@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use narwhal_util::codec::StreamReader;
 use narwhal_util::pool::MutablePoolBuffer;

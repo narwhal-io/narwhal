@@ -13,10 +13,10 @@ use async_channel::{Receiver, Sender, bounded};
 use async_lock::{Mutex, Semaphore, SemaphoreGuardArc};
 use deadpool::managed::Object;
 use deadpool::{Runtime, managed};
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use futures_channel::oneshot;
 use parking_lot::Mutex as PlMutex;
 use parking_lot::RwLock as PlRwLock;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -819,7 +819,7 @@ where
     let task_tracker = self.task_tracker.clone();
     let shutdown_token = self.shutdown_token.clone();
 
-    let (rh, wh) = tokio::io::split(stream);
+    let (rh, wh) = AsyncReadExt::split(stream);
 
     let (writer_tx, writer_rx) = bounded::<(Message, Option<PoolBuffer>)>(OUTBOUND_QUEUE_SIZE);
     task_tracker.spawn(Self::writer_task(
@@ -939,7 +939,7 @@ where
   async fn writer_task(
     client_id: Arc<String>,
     conn_id: u32,
-    mut wh: WriteHalf<S>,
+    mut wh: futures::io::WriteHalf<S>,
     rx: Receiver<(Message, Option<PoolBuffer>)>,
     mut message_buff: MutablePoolBuffer,
     error_state: ErrorState,
@@ -977,7 +977,7 @@ where
       }
     }
 
-    match wh.shutdown().await {
+    match wh.close().await {
       Ok(_) => {},
       Err(e) => warn!(
         client_id = client_id.as_str(),
@@ -993,7 +993,7 @@ where
   async fn reader_task(
     client_id: Arc<String>,
     conn_id: u32,
-    rh: ReadHalf<S>,
+    rh: futures::io::ReadHalf<S>,
     read_buffer: MutablePoolBuffer,
     payload_buffer_pool: Pool,
     pending_requests: PendingRequests,
@@ -1096,7 +1096,7 @@ where
 
   async fn read_message_payload(
     msg: &Message,
-    stream_reader: &mut StreamReader<ReadHalf<S>>,
+    stream_reader: &mut StreamReader<futures::io::ReadHalf<S>>,
     mut pool_buff: MutablePoolBuffer,
     payload_read_timeout: Duration,
   ) -> anyhow::Result<Option<PoolBuffer>> {
@@ -1119,7 +1119,7 @@ where
   async fn write_message(
     message: &Message,
     payload_opt: Option<PoolBuffer>,
-    writer: &mut WriteHalf<S>,
+    writer: &mut futures::io::WriteHalf<S>,
     write_buffer: &mut [u8],
   ) -> anyhow::Result<()> {
     let n = serialize(message, write_buffer).map_err(|e| anyhow!("failed to serialize message: {}", e))?;
@@ -1135,7 +1135,10 @@ where
     Ok(())
   }
 
-  async fn read_payload(buffer: &mut [u8], stream_reader: &mut StreamReader<ReadHalf<S>>) -> anyhow::Result<()> {
+  async fn read_payload(
+    buffer: &mut [u8],
+    stream_reader: &mut StreamReader<futures::io::ReadHalf<S>>,
+  ) -> anyhow::Result<()> {
     stream_reader.read_raw(buffer).await?;
 
     // Read last byte, and ensure it's a newline.

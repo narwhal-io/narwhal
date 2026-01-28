@@ -4,7 +4,7 @@ All notable changes to Narwhal will be documented in this file.
 
 ## main / unreleased
 
-* [CHANGE]: Migrate to runtime-agnostic primitives to enable future support for alternative async runtimes. [#148](https://github.com/narwhal-io/narwhal/pull/148)
+* [CHANGE]: Migrate to runtime-agnostic primitives to enable future support for alternative async runtimes. [#148](https://github.com/narwhal-io/narwhal/pull/148), [#149](https://github.com/narwhal-io/narwhal/pull/149)
 
 ## 0.4.0 (2026-01-27)
 

@@ -1104,6 +1104,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-stream",
+ "tokio-util",
  "tracing",
 ]
 
@@ -1156,6 +1157,7 @@ name = "narwhal-protocol"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "futures",
  "narwhal-protocol-macros",
  "narwhal-util",
  "once_cell",
@@ -1184,6 +1186,7 @@ dependencies = [
  "console-subscriber",
  "core_affinity",
  "dashmap",
+ "futures",
  "humantime-serde",
  "ktls",
  "narwhal-client",
@@ -1238,6 +1241,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "crossbeam-queue",
+ "futures",
  "humantime",
  "parking_lot",
  "rand",
@@ -1247,6 +1251,7 @@ dependencies = [
  "string_cache",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "webpki-roots",
 ]
 
@@ -2031,6 +2036,7 @@ checksum = "2efa149fe76073d6e8fd97ef4f4eca7b67f599660115591483572e406e165594"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "futures-util",
  "pin-project-lite",
