@@ -3,7 +3,7 @@
 use std::io::IoSlice;
 
 use anyhow;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use futures::io::{AsyncWrite, AsyncWriteExt};
 
 /// Writes all the provided buffers to an asynchronous writer using vectored I/O.
 ///

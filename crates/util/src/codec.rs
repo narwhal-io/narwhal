@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-use tokio::io::{AsyncRead, AsyncReadExt};
+use futures::io::{AsyncRead, AsyncReadExt};
 
 use crate::pool::MutablePoolBuffer;
 
@@ -214,7 +214,6 @@ mod tests {
   use std::task::{Context, Poll};
 
   use crate::pool::Pool;
-  use tokio::io::AsyncRead;
 
   /// Mock reader that returns data in chunks
   struct MockChunkedReader {
@@ -230,32 +229,25 @@ mod tests {
   }
 
   impl AsyncRead for MockChunkedReader {
-    fn poll_read(
-      mut self: Pin<&mut Self>,
-      _cx: &mut Context<'_>,
-      buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_read(mut self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
       if self.current_chunk >= self.chunks.len() {
-        return Poll::Ready(Ok(())); // EOF
+        return Poll::Ready(Ok(0)); // EOF
       }
 
-      let (to_copy, current_data_len) = {
-        let current_data = &self.chunks[self.current_chunk];
-        let remaining = current_data.len() - self.position;
+      let current_data = &self.chunks[self.current_chunk];
+      let remaining = current_data.len() - self.position;
+      let to_copy = std::cmp::min(buf.len(), remaining);
 
-        let to_copy = std::cmp::min(buf.remaining(), remaining);
-        buf.put_slice(&current_data[self.position..self.position + to_copy]);
+      buf[..to_copy].copy_from_slice(&current_data[self.position..self.position + to_copy]);
 
-        (to_copy, current_data.len())
-      };
-
+      let current_data_len = current_data.len();
       self.position += to_copy;
       if self.position >= current_data_len {
         self.current_chunk += 1;
         self.position = 0;
       }
 
-      Poll::Ready(Ok(()))
+      Poll::Ready(Ok(to_copy))
     }
   }
 

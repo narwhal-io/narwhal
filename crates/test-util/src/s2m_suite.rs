@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use tokio::net::TcpStream;
+use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 use narwhal_modulator::{Modulator, S2mListener};
 use narwhal_protocol::{Message, S2mConnectParameters};
@@ -55,10 +56,10 @@ impl<M: Modulator> S2mSuite<M> {
   }
 
   /// Creates a new socket connection to the server without authentication.
-  pub async fn socket_connect(&self) -> anyhow::Result<TestConn<TcpStream>> {
+  pub async fn socket_connect(&self) -> anyhow::Result<TestConn<Compat<TcpStream>>> {
     let addr = self.ln.local_address().expect("local address not set");
 
-    let tcp_stream = TcpStream::connect(&addr).await?;
+    let tcp_stream = TcpStream::connect(&addr).await?.compat();
 
     let max_message_size = self.config().server.limits.max_message_size as usize;
 
@@ -74,7 +75,7 @@ impl<M: Modulator> S2mSuite<M> {
   /// # Arguments
   ///
   /// * `secret` - The secret to use for authentication
-  pub async fn connect(&mut self, secret: &str) -> anyhow::Result<TestConn<TcpStream>> {
+  pub async fn connect(&mut self, secret: &str) -> anyhow::Result<TestConn<Compat<TcpStream>>> {
     let mut socket = self.socket_connect().await?;
 
     socket
@@ -101,7 +102,7 @@ impl<M: Modulator> S2mSuite<M> {
     &mut self,
     secret: &str,
     heartbeat_interval: u32,
-  ) -> anyhow::Result<TestConn<TcpStream>> {
+  ) -> anyhow::Result<TestConn<Compat<TcpStream>>> {
     let mut socket = self.socket_connect().await?;
 
     socket

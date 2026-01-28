@@ -10,6 +10,7 @@ use anyhow::anyhow;
 use serde_derive::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
+use tokio_util::compat::Compat;
 
 use async_channel::Receiver;
 use narwhal_common::client::{self, Handshaker, SessionInfo};
@@ -217,10 +218,13 @@ impl std::fmt::Debug for C2sHandshaker {
 }
 
 #[async_trait::async_trait]
-impl Handshaker<TlsStream<TcpStream>> for C2sHandshaker {
+impl Handshaker<Compat<TlsStream<TcpStream>>> for C2sHandshaker {
   type SessionExtraInfo = C2sSessionExtraInfo;
 
-  async fn handshake(&self, stream: &mut TlsStream<TcpStream>) -> anyhow::Result<(SessionInfo, C2sSessionExtraInfo)> {
+  async fn handshake(
+    &self,
+    stream: &mut Compat<TlsStream<TcpStream>>,
+  ) -> anyhow::Result<(SessionInfo, C2sSessionExtraInfo)> {
     let mut pool = Pool::new(1, DEFAULT_MESSAGE_BUFFER_SIZE);
     let mut message_buff = pool.acquire_buffer().await;
 
@@ -332,7 +336,7 @@ impl C2sHandshaker {
 /// C2S client for connecting to the Narwhal server.
 #[derive(Clone)]
 pub struct C2sClient {
-  client: Arc<client::Client<TlsStream<TcpStream>, C2sHandshaker, C2sService>>,
+  client: Arc<client::Client<Compat<TlsStream<TcpStream>>, C2sHandshaker, C2sService>>,
 }
 
 impl C2sClient {

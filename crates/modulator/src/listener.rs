@@ -8,6 +8,7 @@ use anyhow::anyhow;
 use async_channel::{Receiver, Sender, bounded};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::oneshot;
+use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{info, trace};
 
 use narwhal_common::conn::{ConnManager, ConnWorkerPool, Dispatcher, DispatcherFactory};
@@ -15,12 +16,13 @@ use narwhal_common::service::{M2sService, S2mService, Service};
 use narwhal_util::conn::Stream;
 
 use crate::config::*;
+use crate::conn::{M2sDispatcher, M2sDispatcherFactory, S2mDispatcher, S2mDispatcherFactory};
 
 /// Type alias for S2M listener.
-pub type S2mListener<M> = Listener<crate::conn::S2mDispatcher<M>, crate::conn::S2mDispatcherFactory<M>, S2mService>;
+pub type S2mListener<M> = Listener<S2mDispatcher<M>, S2mDispatcherFactory<M>, S2mService>;
 
 /// Type alias for M2S listener.
-pub type M2sListener = Listener<crate::conn::M2sDispatcher, crate::conn::M2sDispatcherFactory, M2sService>;
+pub type M2sListener = Listener<M2sDispatcher, M2sDispatcherFactory, M2sService>;
 
 /// Modulator server listener.
 pub struct Listener<D, DF, ST>
@@ -266,7 +268,7 @@ where
       "accepted connection"
     );
 
-    worker_pool.submit(move || async move { Ok(Stream::Tcp(tcp_stream)) }).await;
+    worker_pool.submit(move || async move { Ok(Stream::Tcp(tcp_stream.compat())) }).await;
 
     Ok(())
   }
@@ -279,7 +281,7 @@ where
 
     trace!(network = UNIX_NETWORK, service_type = ST::NAME, "accepted connection");
 
-    worker_pool.submit(move || async move { Ok(Stream::Unix(unix_stream)) }).await;
+    worker_pool.submit(move || async move { Ok(Stream::Unix(unix_stream.compat())) }).await;
 
     Ok(())
   }

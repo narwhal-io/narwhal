@@ -26,7 +26,8 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["json", "time"] }
 tokio = { version = "1.48.0", features = ["signal", "tracing"] }
 tokio-rustls = "0.26.4"
-tokio-util = "0.7.16"
+tokio-util = { version = "0.7.16", features = ["compat"] }
+futures = "0.3.31"
 parking_lot = "0.12.5"
 rcgen = "0.14.0"
 rustls = "0.23.32"

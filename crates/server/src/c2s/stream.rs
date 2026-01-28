@@ -4,9 +4,10 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use futures::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::server::TlsStream;
+use tokio_util::compat::Compat;
 
 /// A wrapper enum that can hold either a regular TLS stream or a kTLS-enabled stream.
 ///
@@ -15,20 +16,20 @@ use tokio_rustls::server::TlsStream;
 #[allow(clippy::large_enum_variant)]
 pub enum MaybeKtlsStream {
   /// Regular userspace TLS stream using rustls
-  Regular(TlsStream<TcpStream>),
+  Regular(Compat<TlsStream<TcpStream>>),
 
   /// Kernel TLS stream with encryption offloaded to the kernel
-  Ktls(ktls::KtlsStream<TcpStream>),
+  Ktls(Compat<ktls::KtlsStream<TcpStream>>),
 }
 
 impl MaybeKtlsStream {
   /// Creates a new MaybeKtlsStream from a regular TLS stream
-  pub fn from_tls(stream: TlsStream<TcpStream>) -> Self {
+  pub fn from_tls(stream: Compat<TlsStream<TcpStream>>) -> Self {
     MaybeKtlsStream::Regular(stream)
   }
 
   /// Creates a new MaybeKtlsStream from a kTLS stream
-  pub fn from_ktls(stream: ktls::KtlsStream<TcpStream>) -> Self {
+  pub fn from_ktls(stream: Compat<ktls::KtlsStream<TcpStream>>) -> Self {
     MaybeKtlsStream::Ktls(stream)
   }
 
@@ -39,7 +40,7 @@ impl MaybeKtlsStream {
 }
 
 impl AsyncRead for MaybeKtlsStream {
-  fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+  fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
     match &mut *self {
       MaybeKtlsStream::Regular(stream) => Pin::new(stream).poll_read(cx, buf),
       MaybeKtlsStream::Ktls(stream) => Pin::new(stream).poll_read(cx, buf),
@@ -62,10 +63,10 @@ impl AsyncWrite for MaybeKtlsStream {
     }
   }
 
-  fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+  fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     match &mut *self {
-      MaybeKtlsStream::Regular(stream) => Pin::new(stream).poll_shutdown(cx),
-      MaybeKtlsStream::Ktls(stream) => Pin::new(stream).poll_shutdown(cx),
+      MaybeKtlsStream::Regular(stream) => Pin::new(stream).poll_close(cx),
+      MaybeKtlsStream::Ktls(stream) => Pin::new(stream).poll_close(cx),
     }
   }
 
@@ -77,13 +78,6 @@ impl AsyncWrite for MaybeKtlsStream {
     match &mut *self {
       MaybeKtlsStream::Regular(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
       MaybeKtlsStream::Ktls(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
-    }
-  }
-
-  fn is_write_vectored(&self) -> bool {
-    match self {
-      MaybeKtlsStream::Regular(stream) => stream.is_write_vectored(),
-      MaybeKtlsStream::Ktls(stream) => stream.is_write_vectored(),
     }
   }
 }

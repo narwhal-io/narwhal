@@ -9,6 +9,7 @@ use rustls::ServerConfig;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_rustls::TlsAcceptor;
+use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{info, trace, warn};
 
 use narwhal_common::conn::{ConnWorkerPool, DispatcherFactory};
@@ -278,7 +279,7 @@ impl C2sListener {
           match ktls::config_ktls_server(tls_stream).await {
             Ok(ktls_stream) => {
               trace!(service_type = C2sService::NAME, "kTLS enabled for connection");
-              return Ok(MaybeKtlsStream::from_ktls(ktls_stream));
+              return Ok(MaybeKtlsStream::from_ktls(ktls_stream.compat()));
             },
             Err(e) => {
               warn!(
@@ -293,7 +294,7 @@ impl C2sListener {
 
         // Regular TLS path
         let tls_stream = acceptor.accept(tcp_stream).await?;
-        Ok(MaybeKtlsStream::from_tls(tls_stream))
+        Ok(MaybeKtlsStream::from_tls(tls_stream.compat()))
       })
       .await;
 

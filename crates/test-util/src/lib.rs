@@ -15,7 +15,7 @@ use std::io::Cursor;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use narwhal_protocol::{Message, deserialize, serialize};
 use narwhal_util::{codec::StreamReader, pool::MutablePoolBuffer};
@@ -62,10 +62,10 @@ macro_rules! assert_message {
 ///   network streams like `TcpStream` or `UnixStream`
 pub struct TestConn<T: AsyncRead + AsyncWrite> {
   /// the writer handle for the stream.
-  pub writer: WriteHalf<T>,
+  pub writer: futures::io::WriteHalf<T>,
 
   /// the reader handle for the stream.
-  pub reader: StreamReader<ReadHalf<T>>,
+  pub reader: StreamReader<futures::io::ReadHalf<T>>,
 
   /// buffer for writing messages.
   write_buffer: Vec<u8>,
@@ -86,7 +86,7 @@ impl<T: AsyncRead + AsyncWrite> TestConn<T> {
   ///
   /// A new `TestConn` instance ready for message communication.
   pub fn new(stream: T, read_buffer: MutablePoolBuffer, max_message_size: usize) -> Self {
-    let (rh, wh) = tokio::io::split(stream);
+    let (rh, wh) = AsyncReadExt::split(stream);
     let write_buffer = vec![0u8; max_message_size];
 
     let stream_reader = StreamReader::with_pool_buffer(rh, read_buffer);
@@ -105,12 +105,10 @@ impl<T: AsyncRead + AsyncWrite> TestConn<T> {
   /// * `Ok(())` - If the message was successfully sent
   /// * `Err(anyhow::Error)` - If serialization failed or there was an I/O error
   pub async fn write_message(&mut self, message: Message) -> anyhow::Result<()> {
-    let send_buff = &mut self.write_buffer;
+    let n = serialize(&message, &mut self.write_buffer)?;
 
-    let n = serialize(&message, send_buff)?;
-
-    self.writer.write_all(&send_buff[..n]).await?;
-    self.writer.flush().await?;
+    AsyncWriteExt::write_all(&mut self.writer, &self.write_buffer[..n]).await?;
+    AsyncWriteExt::flush(&mut self.writer).await?;
 
     Ok(())
   }
@@ -193,7 +191,7 @@ impl<T: AsyncRead + AsyncWrite> TestConn<T> {
   /// * `Ok(())` - If the shutdown was successful
   /// * `Err(anyhow::Error)` - If there was an error during the shutdown process
   pub async fn shutdown(&mut self) -> anyhow::Result<()> {
-    self.writer.shutdown().await?;
+    self.writer.close().await?;
     Ok(())
   }
 }

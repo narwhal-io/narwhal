@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
+use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 use tokio_util::sync::CancellationToken;
 
 use narwhal_modulator::client::S2mClient;
@@ -44,7 +45,7 @@ pub struct C2sSuite {
   m2s_router_task_handle: Option<(JoinHandle<()>, CancellationToken)>,
 
   /// Authenticated clients by username.
-  clients: HashMap<String, TestConn<TlsStream<TcpStream>>>,
+  clients: HashMap<String, TestConn<Compat<TlsStream<TcpStream>>>>,
 }
 
 // ===== impl C2sSuite =====
@@ -149,7 +150,7 @@ impl C2sSuite {
     Ok(())
   }
 
-  pub async fn tls_socket_connect(&self) -> anyhow::Result<TestConn<TlsStream<TcpStream>>> {
+  pub async fn tls_socket_connect(&self) -> anyhow::Result<TestConn<Compat<TlsStream<TcpStream>>>> {
     let domain = self.config.listener.domain.clone();
     assert_eq!(self.config.listener.domain, "localhost", "domain is not localhost");
 
@@ -162,7 +163,7 @@ impl C2sSuite {
     let domain = pki_types::ServerName::try_from(domain)?.to_owned();
     let config = TlsConnector::from(client_config);
 
-    let tls_stream = config.connect(domain, tcp_stream).await?;
+    let tls_stream = config.connect(domain, tcp_stream).await?.compat();
 
     let max_message_size = self.config().limits.max_message_size as usize;
 
@@ -343,7 +344,7 @@ impl C2sSuite {
     }
   }
 
-  fn get_tls_socket(&mut self, username: &str) -> anyhow::Result<&mut TestConn<TlsStream<TcpStream>>> {
+  fn get_tls_socket(&mut self, username: &str) -> anyhow::Result<&mut TestConn<Compat<TlsStream<TcpStream>>>> {
     self.clients.get_mut(username).ok_or_else(|| anyhow!("client not found"))
   }
 }
