@@ -15,7 +15,6 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use core_affinity::CoreId;
-
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use rand::random;
 use tokio_util::sync::CancellationToken;
@@ -1471,37 +1470,31 @@ where
     rx: Receiver<ConnProvider<S>>,
     active_streams: Arc<AtomicUsize>,
   ) {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let rt = compio::runtime::Runtime::new().unwrap();
 
     rt.block_on(async move {
-      let local = tokio::task::LocalSet::new();
+      while let Ok(stream_provider) = rx.recv().await {
+        let conn_manager = conn_manager.clone();
+        let dispatcher_factory = dispatcher_factory.clone();
 
-      local
-        .run_until(async move {
-          while let Ok(stream_provider) = rx.recv().await {
-            let conn_manager = conn_manager.clone();
-            let dispatcher_factory = dispatcher_factory.clone();
+        let worker_active_conns = active_streams.clone();
 
-            let worker_active_conns = active_streams.clone();
+        tokio::task::spawn_local(async move {
+          let stream = match stream_provider().await {
+            Ok(s) => s,
+            Err(e) => {
+              warn!("connection provider failed: {}", e.to_string());
+              return;
+            },
+          };
 
-            tokio::task::spawn_local(async move {
-              let stream = match stream_provider().await {
-                Ok(s) => s,
-                Err(e) => {
-                  warn!("connection provider failed: {}", e.to_string());
-                  return;
-                },
-              };
+          worker_active_conns.fetch_add(1, Ordering::Relaxed);
 
-              worker_active_conns.fetch_add(1, Ordering::Relaxed);
+          conn_manager.run_connection(stream, dispatcher_factory).await;
 
-              conn_manager.run_connection(stream, dispatcher_factory).await;
-
-              worker_active_conns.fetch_sub(1, Ordering::Relaxed);
-            });
-          }
-        })
-        .await;
+          worker_active_conns.fetch_sub(1, Ordering::Relaxed);
+        });
+      }
     });
   }
 }
