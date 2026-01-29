@@ -9,6 +9,7 @@ anyhow = "1.0.100"
 async-channel = "2.3.1"
 async-lock = "3.4.2"
 async-trait = "0.1.88"
+compio = { version = "0.17.0" }
 core_affinity = "0.8.1"
 futures-channel = "0.3.31"
 deadpool =  {  version = "0.12.3", features = ["rt_tokio_1"] }
