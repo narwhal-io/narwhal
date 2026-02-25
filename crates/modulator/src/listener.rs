@@ -7,8 +7,8 @@ use std::thread;
 
 use anyhow::anyhow;
 use async_channel::{Sender, bounded};
-use compio::net::TcpListener;
-use compio::runtime::Runtime;
+use monoio::net::TcpListener;
+
 use futures::{FutureExt, select};
 use libc::{
   SIG_BLOCK, SIG_SETMASK, SIGHUP, SIGINT, SIGPIPE, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2, pthread_sigmask, sigaddset,
@@ -45,7 +45,7 @@ pub type M2sListener = Listener<M2sDispatcher, M2sDispatcherFactory, M2sService>
 
 /// Modulator server listener.
 ///
-/// Spawns one or more worker threads, each with its own compio event loop.
+/// Spawns one or more worker threads, each with its own monoio event loop.
 /// For TCP the workers bind to the same port via `SO_REUSEPORT`; for Unix
 /// domain sockets a single worker is used.
 pub struct Listener<D, DF, ST>
@@ -111,7 +111,7 @@ where
 
   /// Bootstraps the listener, starting to accept incoming connections.
   ///
-  /// Spawns worker threads with dedicated compio runtimes, each pinned to
+  /// Spawns worker threads with dedicated monoio runtimes, each pinned to
   /// a CPU core.  For TCP, every worker creates its own listener via
   /// `SO_REUSEPORT`.  For Unix domain sockets a single worker is used.
   pub async fn bootstrap(&mut self) -> anyhow::Result<()> {
@@ -273,8 +273,8 @@ where
             let _ = core_affinity::set_for_current(core_id);
           }
 
-          let rt =
-            Runtime::new().map_err(|e| anyhow!("failed to create compio runtime for worker {}: {}", worker_id, e))?;
+          let mut rt =
+            monoio::RuntimeBuilder::<monoio::FusionDriver>::new().enable_all().build().map_err(|e| anyhow!("failed to create monoio runtime for worker {}: {}", worker_id, e))?;
 
           rt.block_on(async move {
             let listener = if let Some(std_listener) = worker_listener {
@@ -309,9 +309,9 @@ where
                       let conn_mng = conn_mng.clone();
                       let dispatcher_factory = dispatcher_factory.clone();
 
-                      compio::runtime::spawn(async move {
+                      monoio::spawn(async move {
                         conn_mng.run_connection(tcp_stream, dispatcher_factory).await;
-                      }).detach();
+                      });
                     }
                     Err(e) => {
                       warn!(worker_id, error = ?e, service_type = ST::NAME, "TCP accept error");
@@ -400,7 +400,10 @@ where
           let _ = core_affinity::set_for_current(core_id);
         }
 
-        let rt = Runtime::new().map_err(|e| anyhow!("failed to create compio runtime for unix worker: {}", e))?;
+        let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
+          .enable_all()
+          .build()
+          .map_err(|e| anyhow!("failed to create monoio runtime for unix worker: {}", e))?;
 
         rt.block_on(async move {
           let listener = match create_unix_listener(&socket_path) {
@@ -425,9 +428,9 @@ where
                     let conn_mng = conn_mng.clone();
                     let dispatcher_factory = dispatcher_factory.clone();
 
-                    compio::runtime::spawn(async move {
+                    monoio::spawn(async move {
                       conn_mng.run_connection(unix_stream, dispatcher_factory).await;
-                    }).detach();
+                    });
                   }
                   Err(e) => {
                     warn!(worker_id, error = ?e, service_type = ST::NAME, "Unix accept error");
@@ -586,13 +589,13 @@ fn create_plain_tcp_listener(addr: SocketAddr) -> anyhow::Result<std::net::TcpLi
   Ok(listener)
 }
 
-fn create_unix_listener(socket_path: &str) -> anyhow::Result<compio::net::UnixListener> {
+fn create_unix_listener(socket_path: &str) -> anyhow::Result<monoio::net::UnixListener> {
   let std_listener = std::os::unix::net::UnixListener::bind(socket_path)
     .map_err(|e| anyhow!("failed to bind to Unix socket {}: {}", socket_path, e))?;
   std_listener.set_nonblocking(true)?;
 
   let listener =
-    compio::net::UnixListener::from_std(std_listener).map_err(|e| anyhow!("failed to wrap Unix listener: {}", e))?;
+    monoio::net::UnixListener::from_std(std_listener).map_err(|e| anyhow!("failed to wrap Unix listener: {}", e))?;
 
   Ok(listener)
 }

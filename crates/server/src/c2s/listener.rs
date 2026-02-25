@@ -7,14 +7,13 @@ use std::thread;
 
 use anyhow::{Ok, anyhow};
 use async_channel::{Sender, bounded};
-use compio::net::TcpListener;
-use compio::runtime::Runtime;
-use compio_tls::TlsAcceptor;
 use futures::{FutureExt, select};
 use libc::{
   SIG_BLOCK, SIG_SETMASK, SIGHUP, SIGINT, SIGPIPE, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2, pthread_sigmask, sigaddset,
   sigemptyset, sigset_t,
 };
+use monoio::net::TcpListener;
+use monoio_rustls::TlsAcceptor;
 use rustls::ServerConfig;
 use tracing::{error, info, trace, warn};
 
@@ -328,8 +327,11 @@ impl C2sListener {
             let _ = core_affinity::set_for_current(core_id);
           }
 
-          // Create a thread-local runtime
-          let rt = Runtime::new().map_err(|e| anyhow!("failed to create runtime for c2s worker {}: {}", worker_id, e))?;
+          // Create a thread-local monoio runtime
+          let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow!("failed to create runtime for c2s worker {}: {}", worker_id, e))?;
 
           rt.block_on(async move {
             let listener = if let Some(std_listener) = worker_listener {
@@ -368,7 +370,7 @@ impl C2sListener {
                       let conn_mng = conn_mng.clone();
                       let dispatcher_factory = dispatcher_factory.clone();
 
-                      compio::runtime::spawn(async move {
+                      monoio::spawn(async move {
                         // Perform TLS handshake
                         match acceptor.accept(tcp_stream).await {
                           std::result::Result::Ok(tls_stream) => {
@@ -380,7 +382,7 @@ impl C2sListener {
                             warn!(worker_id = worker_id, %remote_addr, error = ?e, service_type = C2sService::NAME, "TLS handshake failed");
                           }
                         }
-                      }).detach();
+                      });
                     }
                     Err(e) => {
                       warn!(worker_id = worker_id, error = ?e, service_type = C2sService::NAME, "accept error");

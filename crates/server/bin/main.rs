@@ -21,7 +21,7 @@ struct Cli {
 fn main() {
   narwhal_server::setup_panic_hook();
 
-  let rt = compio::runtime::Runtime::new().unwrap();
+  let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new().enable_all().build().unwrap();
 
   rt.block_on(async {
     let cli = Cli::parse();

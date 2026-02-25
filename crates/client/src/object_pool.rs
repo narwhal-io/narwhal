@@ -457,7 +457,7 @@ mod tests {
     }
   }
 
-  #[compio::test]
+  #[monoio::test(enable_timer = true)]
   async fn test_basic_get_and_return() {
     let pool = ObjectPool::builder(test_manager()).max_size(2).build().unwrap();
 
@@ -470,7 +470,7 @@ mod tests {
     assert_eq!(obj.id, 0);
   }
 
-  #[compio::test]
+  #[monoio::test(enable_timer = true)]
   async fn test_creates_up_to_max_size() {
     let pool = ObjectPool::builder(test_manager()).max_size(2).build().unwrap();
 
@@ -483,7 +483,7 @@ mod tests {
     drop(obj2);
   }
 
-  #[compio::test]
+  #[monoio::test(enable_timer = true)]
   async fn test_waits_when_full() {
     let pool = ObjectPool::builder(test_manager()).max_size(1).build().unwrap();
 
@@ -495,27 +495,26 @@ mod tests {
     let done = Arc::new(AtomicBool::new(false));
     let done2 = done.clone();
 
-    compio::runtime::spawn(async move {
+    let _handle = monoio::spawn(async move {
       let obj = pool2.get().await.unwrap();
       // Should receive the recycled object from the first get().
       assert_eq!(obj.id, 0);
       done2.store(true, Ordering::SeqCst);
-    })
-    .detach();
+    });
 
     // Yield so the spawned task has a chance to reach the semaphore wait.
-    compio::time::sleep(Duration::from_millis(50)).await;
+    monoio::time::sleep(Duration::from_millis(50)).await;
     assert!(!done.load(Ordering::SeqCst), "spawned task should still be blocked");
 
     // Return the object — releases the permit and wakes the waiter.
     drop(obj);
 
     // Yield so the spawned task can complete.
-    compio::time::sleep(Duration::from_millis(50)).await;
+    monoio::time::sleep(Duration::from_millis(50)).await;
     assert!(done.load(Ordering::SeqCst), "spawned task should have completed");
   }
 
-  #[compio::test]
+  #[monoio::test(enable_timer = true)]
   async fn test_unhealthy_object_discarded() {
     let pool = ObjectPool::builder(test_manager()).max_size(2).build().unwrap();
 
@@ -528,7 +527,7 @@ mod tests {
     assert_eq!(obj.id, 1);
   }
 
-  #[compio::test]
+  #[monoio::test(enable_timer = true)]
   async fn test_retain_filters_idle() {
     let pool = ObjectPool::builder(test_manager()).max_size(4).build().unwrap();
 
@@ -547,7 +546,7 @@ mod tests {
     assert_eq!(obj.id, 0);
   }
 
-  #[compio::test]
+  #[monoio::test(enable_timer = true)]
   async fn test_close_prevents_get() {
     let pool = ObjectPool::builder(test_manager()).max_size(2).build().unwrap();
 
@@ -557,7 +556,7 @@ mod tests {
     assert!(matches!(err, Err(ObjectPoolError::Closed)));
   }
 
-  #[compio::test]
+  #[monoio::test(enable_timer = true)]
   async fn test_close_wakes_blocked_waiters() {
     let pool = ObjectPool::builder(test_manager()).max_size(1).build().unwrap();
 
@@ -569,29 +568,28 @@ mod tests {
     let got_closed = Arc::new(AtomicBool::new(false));
     let got_closed2 = got_closed.clone();
 
-    compio::runtime::spawn(async move {
+    let _handle = monoio::spawn(async move {
       let result = pool2.get().await;
       if matches!(result, Err(ObjectPoolError::Closed)) {
         got_closed2.store(true, Ordering::SeqCst);
       }
-    })
-    .detach();
+    });
 
     // Yield so the spawned task reaches the semaphore wait.
-    compio::time::sleep(Duration::from_millis(50)).await;
+    monoio::time::sleep(Duration::from_millis(50)).await;
     assert!(!got_closed.load(Ordering::SeqCst));
 
     // Close the pool — should immediately wake the blocked waiter.
     pool.close();
 
     // Yield so the spawned task can observe the close signal.
-    compio::time::sleep(Duration::from_millis(50)).await;
+    monoio::time::sleep(Duration::from_millis(50)).await;
     assert!(got_closed.load(Ordering::SeqCst), "blocked waiter should have received Closed");
 
     drop(obj);
   }
 
-  #[compio::test]
+  #[monoio::test(enable_timer = true)]
   async fn test_create_failure_releases_slot() {
     let mgr = test_manager();
     mgr.fail_create.store(true, Ordering::Relaxed);

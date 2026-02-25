@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use compio::net::TcpStream;
+use monoio::net::TcpStream;
 
 use narwhal_modulator::{Modulator, S2mListener};
 use narwhal_protocol::{Message, S2mConnectParameters};
@@ -58,8 +58,8 @@ impl<M: Modulator> S2mSuite<M> {
 
   /// Creates a new socket connection to the server without authentication.
   ///
-  /// Uses `compio::net::TcpStream` so the returned `TestConn` works
-  /// natively with compio's completion-based I/O.
+  /// Uses `monoio::net::TcpStream` so the returned `TestConn` works
+  /// natively with monoio's completion-based I/O.
   pub async fn socket_connect(&self) -> anyhow::Result<TestConn<TcpStream>> {
     let addr = self.ln.local_address().expect("local address not set");
 

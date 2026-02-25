@@ -7,8 +7,8 @@ license = "BSD-3-Clause"
 [dependencies]
 anyhow = "1.0.101"
 async-trait = "0.1.89"
-compio = { version = "0.18.0", features = ["net", "time"] }
-compio-tls = { version = "0.9.0", features = ["rustls"] }
+monoio = { version = "0.2.4", features = ["bytes"] }
+monoio-rustls = "0.4.0"
 futures = "0.3.32"
 async-broadcast = "0.7.2"
 async-channel = "2.5.0"
@@ -18,5 +18,6 @@ narwhal-modulator = { path = "../modulator" }
 narwhal-protocol = { path = "../protocol" }
 narwhal-server = { path = "../server" }
 narwhal-util = { path = "../util" }
+pki-types = { package = "rustls-pki-types", version = "1" }
 rustls = "0.23.36"
 webpki-roots = "1.0.6"

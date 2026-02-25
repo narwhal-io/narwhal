@@ -12,9 +12,10 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use compio::buf::{BufResult, IoBuf, IoBufMut};
-use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use futures::FutureExt;
+use monoio::BufResult;
+use monoio::buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut};
+use monoio::io::{AsyncReadRent, AsyncWriteRent, AsyncWriteRentExt};
 use rand::random;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
@@ -28,7 +29,7 @@ use narwhal_protocol::ErrorReason::{
 };
 use narwhal_protocol::{ErrorParameters, Message, PingParameters, SerializeError, deserialize, serialize};
 
-use narwhal_util::codec_compio::{StreamReader, StreamReaderError};
+use narwhal_util::codec_monoio::{StreamReader, StreamReaderError};
 
 use narwhal_util::pool::{BucketedPool, MutablePoolBuffer, Pool, PoolBuffer};
 use narwhal_util::string_atom::StringAtom;
@@ -38,15 +39,15 @@ use crate::service::Service;
 
 const SERVER_OVERLOADED_ERROR: &[u8] = b"ERROR reason=SERVER_OVERLOADED detail=\\\"max connections reached\\\"\n";
 
-/// A lock-free shared stream wrapper for compio's single-threaded runtime.
+/// A lock-free shared stream wrapper for a single-threaded io_uring runtime.
 ///
 /// Multiple clones of a `LocalStream` share the same underlying stream via
 /// `Rc<UnsafeCell<S>>`.
 ///
 /// # Safety
 ///
-/// Only safe within a **single-threaded**, cooperative async runtime like
-/// compio. Because only one task ever executes at a time, the two halves
+/// Only safe within a **single-threaded**, cooperative async runtime.
+/// Because only one task ever executes at a time, the two halves
 /// never actually access the inner stream concurrently.
 struct LocalStream<S>(Rc<UnsafeCell<S>>);
 
@@ -62,19 +63,29 @@ impl<S> Clone for LocalStream<S> {
   }
 }
 
-impl<S: AsyncRead + Unpin> AsyncRead for LocalStream<S> {
+impl<S: AsyncReadRent> AsyncReadRent for LocalStream<S> {
   async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
-    // SAFETY: compio is single-threaded and cooperative – only one task
+    // SAFETY: single-threaded and cooperative – only one task
     // executes at any point, so no concurrent mutable access can occur.
     let stream = unsafe { &mut *self.0.get() };
     stream.read(buf).await
   }
+
+  async fn readv<B: IoVecBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+    let stream = unsafe { &mut *self.0.get() };
+    stream.readv(buf).await
+  }
 }
 
-impl<S: AsyncWrite + Unpin> AsyncWrite for LocalStream<S> {
+impl<S: AsyncWriteRent> AsyncWriteRent for LocalStream<S> {
   async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
     let stream = unsafe { &mut *self.0.get() };
     stream.write(buf).await
+  }
+
+  async fn writev<B: IoVecBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+    let stream = unsafe { &mut *self.0.get() };
+    stream.writev(buf).await
   }
 
   async fn flush(&mut self) -> std::io::Result<()> {
@@ -442,7 +453,7 @@ impl<ST: Service> ConnManager<ST> {
         break;
       }
 
-      compio::time::sleep(SHUTDOWN_DRAIN_POLL_INTERVAL).await;
+      monoio::time::sleep(SHUTDOWN_DRAIN_POLL_INTERVAL).await;
     }
 
     info!(service_type = ST::NAME, "connection manager stopped");
@@ -456,7 +467,7 @@ impl<ST: Service> ConnManager<ST> {
     mut stream: S,
     mut dispatcher_factory: DF,
   ) where
-    S: AsyncRead + AsyncWrite + Unpin + 'static,
+    S: AsyncReadRent + AsyncWriteRent + 'static,
   {
     let mut inner = self.0.write().await;
 
@@ -479,7 +490,7 @@ impl<ST: Service> ConnManager<ST> {
     if current_connections >= config.max_connections {
       active_connections.fetch_sub(1, Ordering::SeqCst);
 
-      let _ = stream.write_all(SERVER_OVERLOADED_ERROR).await;
+      let _ = stream.write_all(SERVER_OVERLOADED_ERROR.to_vec()).await;
       let _ = stream.flush().await;
       let _ = stream.shutdown().await;
 
@@ -554,7 +565,6 @@ impl<ST: Service> ConnManager<ST> {
 }
 
 /// A client connection.
-#[derive(Debug)]
 pub struct Conn<D: Dispatcher> {
   /// The connection configuration.
   config: Arc<Config>,
@@ -580,8 +590,10 @@ pub struct Conn<D: Dispatcher> {
   // Channel to send PONG notifications to ping loop
   pong_notifier: Option<Sender<u32>>,
 
-  /// Current scheduled task (ping or timeout).
-  scheduled_task: Option<Task>,
+  /// Cancellation sender for the current scheduled task (ping or timeout).
+  /// Dropping this sender signals the spawned task to stop (monoio's
+  /// JoinHandle drop does NOT cancel the task, so we use a channel).
+  scheduled_task: Option<Sender<()>>,
 
   /// Track tasks associated with connection requests.
   request_tasks: Rc<RefCell<Slab<Task>>>,
@@ -701,8 +713,8 @@ impl<D: Dispatcher> Conn<D> {
     let task_slot = self.request_tasks.borrow().vacant_key();
     let request_tasks = self.request_tasks.clone();
 
-    let task = compio::runtime::spawn(async move {
-      let timeout_future = compio::time::timeout(request_timeout, future);
+    let task = monoio::spawn(async move {
+      let timeout_future = monoio::time::timeout(request_timeout, future);
 
       futures::select! {
         res = timeout_future.fuse() => {
@@ -742,14 +754,18 @@ impl<D: Dispatcher> Conn<D> {
   /// Schedules a timeout task.
   fn schedule_timeout(&mut self, timeout: Duration, detail: Option<StringAtom>) {
     let tx = self.tx.clone();
+    let (cancel_tx, cancel_rx) = bounded::<()>(1);
 
-    let timeout_task = compio::runtime::spawn(async move {
-      compio::time::sleep(timeout).await;
-
-      tx.close(Message::Error(ErrorParameters { id: None, reason: Timeout.into(), detail }));
+    monoio::spawn(async move {
+      futures::select! {
+        _ = monoio::time::sleep(timeout).fuse() => {
+          tx.close(Message::Error(ErrorParameters { id: None, reason: Timeout.into(), detail }));
+        },
+        _ = cancel_rx.recv().fuse() => {},
+      }
     });
 
-    self.scheduled_task = Some(timeout_task);
+    self.scheduled_task = Some(cancel_tx);
   }
 
   /// Runs the ping/pong monitoring loop
@@ -766,11 +782,19 @@ impl<D: Dispatcher> Conn<D> {
     let (pong_tx, pong_rx) = bounded::<u32>(1);
     self.pong_notifier = Some(pong_tx);
 
-    let ping_task = compio::runtime::spawn(async move {
+    // Create cancellation channel (monoio JoinHandle drop doesn't cancel)
+    let (cancel_tx, cancel_rx) = bounded::<()>(1);
+
+    monoio::spawn(async move {
+      let mut cancel = std::pin::pin!(cancel_rx.recv().fuse());
       let mut last_check_counter = activity_counter.get();
 
       loop {
-        compio::time::sleep(heartbeat_interval).await;
+        // Sleep with cancellation
+        futures::select! {
+          _ = monoio::time::sleep(heartbeat_interval).fuse() => {},
+          _ = cancel.as_mut() => break,
+        }
 
         let current_counter = activity_counter.get();
 
@@ -783,43 +807,39 @@ impl<D: Dispatcher> Conn<D> {
         tx.send_message(Message::Ping(PingParameters { id: ping_id }));
         trace!(id = ping_id, handler, service_type = ST::NAME, "sent ping");
 
-        // Wait for PONG or timeout
-        match compio::time::timeout(heartbeat_timeout, pong_rx.recv()).await {
-          Ok(Ok(pong_id)) if pong_id == ping_id => {
-            trace!(id = ping_id, "pong received");
-
-            last_check_counter = activity_counter.get();
+        // Wait for PONG or timeout, with cancellation
+        futures::select! {
+          result = monoio::time::timeout(heartbeat_timeout, pong_rx.recv()).fuse() => {
+            match result {
+              Ok(Ok(pong_id)) if pong_id == ping_id => {
+                trace!(id = ping_id, "pong received");
+                last_check_counter = activity_counter.get();
+              },
+              Ok(Ok(_)) => {
+                tx.close(Message::Error(ErrorParameters {
+                  id: None,
+                  reason: BadRequest.into(),
+                  detail: Some(StringAtom::from("wrong pong id")),
+                }));
+                break;
+              },
+              Ok(Err(_)) => break,
+              Err(_) => {
+                tx.close(Message::Error(ErrorParameters {
+                  id: None,
+                  reason: Timeout.into(),
+                  detail: Some(StringAtom::from("ping timeout")),
+                }));
+                break;
+              },
+            }
           },
-
-          // Wrong pong id
-          Ok(Ok(_)) => {
-            tx.close(Message::Error(ErrorParameters {
-              id: None,
-              reason: BadRequest.into(),
-              detail: Some(StringAtom::from("wrong pong id")),
-            }));
-            break;
-          },
-
-          // Connection closing...
-          Ok(Err(_)) => {
-            break;
-          },
-
-          // Timeout - no PONG received
-          Err(_) => {
-            tx.close(Message::Error(ErrorParameters {
-              id: None,
-              reason: Timeout.into(),
-              detail: Some(StringAtom::from("ping timeout")),
-            }));
-            break;
-          },
+          _ = cancel.as_mut() => break,
         }
       }
     });
 
-    self.scheduled_task = Some(ping_task);
+    self.scheduled_task = Some(cancel_tx);
   }
 
   /// Cancels currently scheduled task.
@@ -887,7 +907,7 @@ impl<D: Dispatcher> Conn<D> {
     rate_limit: u32,
   ) -> anyhow::Result<()>
   where
-    S: AsyncRead + AsyncWrite + Unpin + 'static,
+    S: AsyncReadRent + AsyncWriteRent + 'static,
     ST: Service,
   {
     let local_stream = LocalStream::new(stream);
@@ -957,7 +977,7 @@ impl<D: Dispatcher> Conn<D> {
     handler: usize,
     service_name: &'static str,
   ) where
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncReadRent + AsyncWriteRent + 'static,
   {
     let mut rate_limit_counter: u32 = 0;
     let mut rate_limit_last_check = std::time::Instant::now();
@@ -990,7 +1010,7 @@ impl<D: Dispatcher> Conn<D> {
 
                 let pool_buff = payload_buffer_pool.acquire_buffer(payload_info.length).await.unwrap();
 
-                match compio::time::timeout(
+                match monoio::time::timeout(
                   payload_read_timeout,
                   Self::read_payload(
                     pool_buff,
@@ -1116,8 +1136,8 @@ impl<D: Dispatcher> Conn<D> {
     rate_limit: u32,
   ) -> anyhow::Result<()>
   where
-    T: AsyncRead + AsyncWrite + Unpin + 'static,
-    W: AsyncWrite + Unpin,
+    T: AsyncReadRent + AsyncWriteRent + 'static,
+    W: AsyncWriteRent,
     ST: Service,
   {
     // Initialize stream reader and hand it off to the read loop.
@@ -1127,7 +1147,7 @@ impl<D: Dispatcher> Conn<D> {
     let (read_tx, read_rx) = bounded::<ReadResult>(READ_CHANNEL_CAPACITY);
 
     // Spawn the read loop as a separate task.
-    let reader_task = compio::runtime::spawn(Self::run_read_loop(
+    let reader_task = monoio::spawn(Self::run_read_loop(
       stream_reader,
       read_tx,
       payload_buffer_pool,
@@ -1139,6 +1159,7 @@ impl<D: Dispatcher> Conn<D> {
     ));
 
     let mut pool_buffer_batch = Vec::<PoolBuffer>::with_capacity(MAX_BUFFERS_PER_BATCH);
+    let mut iovec_batch = Vec::<libc::iovec>::with_capacity(MAX_BUFFERS_PER_BATCH);
 
     let mut cancelled = std::pin::pin!(shutdown_token.cancelled().fuse());
 
@@ -1161,7 +1182,7 @@ impl<D: Dispatcher> Conn<D> {
               break 'connection_loop;
             }
             Ok(ReadResult::Error(err_message)) => {
-              let _  = Self::write_message(&err_message, None, writer, message_buffer_pool.acquire_buffer().await, &newline_buffer, pool_buffer_batch).await?;
+              let _  = Self::write_message(&err_message, None, writer, message_buffer_pool.acquire_buffer().await, &newline_buffer, pool_buffer_batch, iovec_batch).await?;
               break 'connection_loop;
             }
             Err(_) => {
@@ -1202,13 +1223,13 @@ impl<D: Dispatcher> Conn<D> {
             }
           }
 
-          pool_buffer_batch = Self::write_batch(pool_buffer_batch, writer).await?;
+          (pool_buffer_batch, iovec_batch) = Self::write_batch(pool_buffer_batch, iovec_batch, writer).await?;
         },
 
         // Close the connection.
         res = close_rx.recv().fuse() => {
           let err_message = res.unwrap();
-          let _  = Self::write_message(&err_message, None, writer, message_buffer_pool.acquire_buffer().await, &newline_buffer, pool_buffer_batch).await?;
+          let _  = Self::write_message(&err_message, None, writer, message_buffer_pool.acquire_buffer().await, &newline_buffer, pool_buffer_batch, iovec_batch).await?;
           trace!(handler = handler, service_type = ST::NAME, "closed connection");
           break 'connection_loop;
         },
@@ -1216,7 +1237,7 @@ impl<D: Dispatcher> Conn<D> {
         // Close the connection on shutdown.
         _ = cancelled.as_mut() => {
           let err_message = Message::Error(ErrorParameters{id: None, reason: ServerShuttingDown.into(), detail: None});
-          let _ = Self::write_message(&err_message, None, writer, message_buffer_pool.acquire_buffer().await, &newline_buffer, pool_buffer_batch).await?;
+          let _ = Self::write_message(&err_message, None, writer, message_buffer_pool.acquire_buffer().await, &newline_buffer, pool_buffer_batch, iovec_batch).await?;
           trace!(handler = handler, service_type = ST::NAME, "closed connection on shutdown");
           break 'connection_loop;
         },
@@ -1236,9 +1257,10 @@ impl<D: Dispatcher> Conn<D> {
     message_buffer: MutablePoolBuffer,
     newline_buffer: &PoolBuffer,
     mut batch: Vec<PoolBuffer>,
-  ) -> anyhow::Result<Vec<PoolBuffer>>
+    iovec_batch: Vec<libc::iovec>,
+  ) -> anyhow::Result<(Vec<PoolBuffer>, Vec<libc::iovec>)>
   where
-    W: AsyncWrite + Unpin,
+    W: AsyncWriteRent,
   {
     let message_buff = Self::serialize_message(message, message_buffer)?;
     batch.push(message_buff);
@@ -1248,23 +1270,68 @@ impl<D: Dispatcher> Conn<D> {
       batch.push(newline_buffer.clone());
     };
 
-    Self::write_batch(batch, writer).await
+    Self::write_batch(batch, iovec_batch, writer).await
   }
 
-  async fn write_batch<W>(batch: Vec<PoolBuffer>, writer: &mut W) -> anyhow::Result<Vec<PoolBuffer>>
+  async fn write_batch<W>(
+    mut batch: Vec<PoolBuffer>,
+    mut iovec_batch: Vec<libc::iovec>,
+    writer: &mut W,
+  ) -> anyhow::Result<(Vec<PoolBuffer>, Vec<libc::iovec>)>
   where
-    W: AsyncWrite + Unpin,
+    W: AsyncWriteRent,
   {
-    let buf_result = writer.write_vectored_all(batch).await;
+    // Populate the pre-allocated iovec batch from the pool buffers.
+    iovec_batch.extend(batch.iter().map(|b| libc::iovec { iov_base: b.read_ptr() as *mut _, iov_len: b.bytes_init() }));
 
-    buf_result.0?;
+    let mut remaining: usize = iovec_batch.iter().map(|v| v.iov_len).sum();
 
-    let mut batch = buf_result.1;
+    // Loop writev until every byte is out.
+    while remaining > 0 {
+      let (result, returned_iovecs) = writer.writev(iovec_batch).await;
+      let written = result?;
+
+      iovec_batch = returned_iovecs;
+
+      if written == 0 {
+        return Err(anyhow!("writev unable to make progress"));
+      }
+      remaining -= written;
+
+      if remaining == 0 {
+        break;
+      }
+
+      // Advance iovecs past the bytes just written.
+      let mut consumed = 0usize;
+      let mut to_skip = written;
+
+      for iovec in iovec_batch.iter_mut() {
+        if to_skip >= iovec.iov_len {
+          to_skip -= iovec.iov_len;
+          consumed += 1;
+        } else {
+          // SAFETY: we advance the pointer within the bounds of the
+          // original PoolBuffer, which is kept alive in `batch`.
+          iovec.iov_base = unsafe { (iovec.iov_base as *mut u8).add(to_skip) as *mut _ };
+          iovec.iov_len -= to_skip;
+          break;
+        }
+      }
+
+      // Remove fully-consumed entries so writev never sees leading
+      // zero-length iovecs (which some implementations return 0 for).
+      if consumed > 0 {
+        iovec_batch.drain(..consumed);
+      }
+    }
+
     batch.clear();
+    iovec_batch.clear();
 
     writer.flush().await?;
 
-    Ok(batch)
+    Ok((batch, iovec_batch))
   }
 
   async fn add_message_to_batch(
@@ -1320,8 +1387,8 @@ impl<D: Dispatcher> Conn<D> {
     correlation_id: Option<u32>,
   ) -> anyhow::Result<PayloadReadResult<B>>
   where
-    B: IoBufMut,
-    T: AsyncRead + Unpin,
+    B: IoBuf + IoBufMut,
+    T: AsyncReadRent + 'static,
   {
     buf = stream_reader.read_raw(buf, len).await?;
 
