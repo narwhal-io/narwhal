@@ -177,8 +177,8 @@ impl ExponentialBackoff {
 mod tests {
   use super::*;
   use std::sync::{Arc, Mutex};
-  use std::time::Instant;
   use std::time::Duration;
+  use std::time::Instant;
 
   // Helper struct to control operation behavior
   #[derive(Clone)]
