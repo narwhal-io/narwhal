@@ -6,8 +6,8 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use compio_buf::{IoBuf, IoBufMut, SetLen};
 use crossbeam_queue::ArrayQueue;
+use monoio::buf::{IoBuf, IoBufMut};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// A generic buffer pool that allows sharing buffers across threads.
@@ -381,25 +381,29 @@ impl DerefMut for MutablePoolBuffer {
   }
 }
 
-impl IoBuf for MutablePoolBuffer {
-  fn as_init(&self) -> &[u8] {
-    (**self).as_init()
+unsafe impl IoBuf for MutablePoolBuffer {
+  fn read_ptr(&self) -> *const u8 {
+    self.0.data.as_ref().unwrap().as_ptr()
   }
 
-  fn buf_len(&self) -> usize {
-    (**self).buf_len()
-  }
-}
-
-impl IoBufMut for MutablePoolBuffer {
-  fn as_uninit(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
-    (**self).as_uninit()
+  fn bytes_init(&self) -> usize {
+    self.0.data.as_ref().unwrap().len()
   }
 }
 
-impl SetLen for MutablePoolBuffer {
-  unsafe fn set_len(&mut self, len: usize) {
-    unsafe { (**self).set_len(len) }
+unsafe impl IoBufMut for MutablePoolBuffer {
+  fn write_ptr(&mut self) -> *mut u8 {
+    self.0.data.as_mut().unwrap().as_mut_ptr()
+  }
+
+  fn bytes_total(&mut self) -> usize {
+    self.0.data.as_ref().unwrap().capacity()
+  }
+
+  unsafe fn set_init(&mut self, pos: usize) {
+    unsafe {
+      self.0.data.as_mut().unwrap().set_len(pos);
+    }
   }
 }
 
@@ -456,12 +460,12 @@ impl Deref for PoolBuffer {
   }
 }
 
-impl IoBuf for PoolBuffer {
-  fn as_init(&self) -> &[u8] {
-    self.as_slice()
+unsafe impl IoBuf for PoolBuffer {
+  fn read_ptr(&self) -> *const u8 {
+    self.as_slice().as_ptr()
   }
 
-  fn buf_len(&self) -> usize {
+  fn bytes_init(&self) -> usize {
     self.len
   }
 }
@@ -469,9 +473,9 @@ impl IoBuf for PoolBuffer {
 #[cfg(test)]
 mod pool_tests {
   use super::*;
-  use compio_buf::{IoBuf, IoBufMut};
+  use monoio::buf::{IoBuf, IoBufMut};
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_buffer_pool() {
     let pool = Pool::new(5, 1024);
 
@@ -495,38 +499,30 @@ mod pool_tests {
     drop(buf2);
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_io_buf_mut_conformance() {
     let pool = Pool::new(1, 1024);
     let mut buf = pool.acquire_buffer().await;
 
-    // Test IoBuf trait - as_init() should return initialized bytes
-    let init = buf.as_init();
-    let initial_len = buf.buf_len();
-    assert!(init.len() == initial_len);
-    assert_eq!(buf.buf_capacity(), 1024);
+    assert_eq!(buf.bytes_total(), 1024);
 
-    // Clear the buffer to get uninit space
+    // Clear the buffer
     buf.clear();
-    assert_eq!(buf.buf_len(), 0);
+    assert_eq!(buf.bytes_init(), 0);
 
-    // Test IoBufMut trait - as_uninit() should return full buffer as uninit
-    let uninit = buf.as_uninit();
-    assert_eq!(uninit.len(), 1024);
+    // Test IoBufMut trait - bytes_total() should return full capacity
+    assert_eq!(buf.bytes_total(), 1024);
 
-    // Test SetLen trait - set_len should work
+    // Test set_init - set initialized length
     unsafe {
-      buf.set_len(10);
+      buf.set_init(10);
     }
-    assert_eq!(buf.buf_len(), 10);
+    assert_eq!(buf.bytes_init(), 10);
 
-    // Test that we can write to the buffer through IoBufMut
-    // as_uninit() returns the FULL buffer including initialized bytes
-    let uninit_slice = buf.as_uninit();
-    assert_eq!(uninit_slice.len(), 1024); // Full capacity as MaybeUninit
-    // Write to the uninit portion (after the initialized 10 bytes)
-    if uninit_slice.len() > 10 {
-      uninit_slice[10].write(42);
+    // Test that we can write to the buffer through IoBufMut write_ptr
+    unsafe {
+      let ptr = buf.write_ptr();
+      *ptr = 42;
     }
 
     // Verify deref works - we should be able to use BytesMut methods
@@ -534,7 +530,7 @@ mod pool_tests {
     assert_eq!(buf.len(), 0);
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_shared_buffer_conversion() {
     let pool = Pool::new(1, 1024);
     let mut buf = pool.acquire_buffer().await;
@@ -553,7 +549,7 @@ mod pool_tests {
     // Note: buf is moved by freeze(), so we can't access it here
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_multithreaded() {
     use std::sync::Arc;
     use std::thread;
@@ -780,7 +776,7 @@ mod bucketed_pool_tests {
     BucketedPool::new_with_memory_budget(1024, 8192, 0, 100, 2, 0.5);
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_acquire_appropriate_bucket() {
     // Test that acquire() returns the right bucket size for different requests
     let pool = BucketedPool::new_with_memory_budget(100, 800, 100 * 1024, 100, 2, 0.5);
@@ -802,7 +798,7 @@ mod bucketed_pool_tests {
     assert_eq!(buf4.len(), 800);
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_no_available_for_oversized_requests() {
     // Test that oversized requests return None
     let pool = BucketedPool::new_with_memory_budget(100, 400, 10 * 1024, 100, 2, 0.5);
@@ -816,7 +812,7 @@ mod bucketed_pool_tests {
     assert_eq!(pool.total_available_count(), initial_available);
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_bucket_reuse() {
     // Test that buffers are properly returned to their buckets
     let pool = BucketedPool::new_with_memory_budget(100, 400, 10 * 1024, 100, 2, 0.5);
@@ -839,7 +835,7 @@ mod bucketed_pool_tests {
     assert_eq!(pool.total_in_use_count(), initial_in_use);
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_multithreaded_bucketed_pool() {
     // Test concurrent access to the bucketed pool
     let pool = Arc::new(BucketedPool::new_with_memory_budget(1024, 4096, 200 * 1024, 100, 2, 0.5));
@@ -847,32 +843,35 @@ mod bucketed_pool_tests {
 
     for i in 0..10 {
       let pool_clone = pool.clone();
-      let handle = thread::spawn(async move || {
-        // Each thread requests a different size (max 4000 to stay within 4096 limit)
-        let size = 400 + i * 350;
-        let mut buf = pool_clone.acquire_buffer(size).await.unwrap();
+      let handle = thread::spawn(move || {
+        let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new().enable_all().build().unwrap();
+        rt.block_on(async move {
+          // Each thread requests a different size (max 4000 to stay within 4096 limit)
+          let size = 400 + i * 350;
+          let mut buf = pool_clone.acquire_buffer(size).await.unwrap();
 
-        // Write some data
-        buf.as_mut_slice()[0] = i as u8;
+          // Write some data
+          buf.as_mut_slice()[0] = i as u8;
 
-        // Verify we can read it back
-        assert_eq!(buf.as_slice()[0], i as u8);
+          // Verify we can read it back
+          assert_eq!(buf.as_slice()[0], i as u8);
 
-        // Simulate some work
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+          // Simulate some work
+          monoio::time::sleep(std::time::Duration::from_millis(10)).await;
+        });
       });
       handles.push(handle);
     }
 
     for handle in handles {
-      handle.join().unwrap().await;
+      handle.join().unwrap();
     }
 
     // All pool-managed buffers should be returned
     assert_eq!(pool.total_in_use_count(), 0);
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_stats_tracking() {
     // Test that statistics are properly tracked across all buckets
     let pool = BucketedPool::new_with_memory_budget(100, 800, 10 * 1024, 100, 2, 0.5);
@@ -902,7 +901,7 @@ mod bucketed_pool_tests {
     assert_eq!(pool.total_available_count(), initial_available);
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_edge_case_exact_size_match() {
     // Create pool with enough buffers for all requests
     let pool = BucketedPool::new_with_memory_budget(100, 400, 10 * 1024, 100, 2, 0.5);
@@ -918,7 +917,7 @@ mod bucketed_pool_tests {
     assert_eq!(buf3.len(), 400);
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_large_growth_factor() {
     // Test with larger growth factor
     let pool = BucketedPool::new_with_memory_budget(100, 1600, 100 * 1024, 100, 4, 0.5);
@@ -934,7 +933,7 @@ mod bucketed_pool_tests {
     }
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_mixed_pool_and_none() {
     // Test mix of pool allocations and None for oversized
     let pool = BucketedPool::new_with_memory_budget(100, 200, 10 * 1024, 100, 2, 0.5);
@@ -974,7 +973,7 @@ mod bucketed_pool_tests {
     assert!(debug_str.contains("total_available"));
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_clone_behavior() {
     // Test that cloning works correctly
     let pool = BucketedPool::new_with_memory_budget(100, 400, 10 * 1024, 100, 2, 0.5);
@@ -997,7 +996,7 @@ mod bucketed_pool_tests {
     assert_eq!(cloned_pool.total_in_use_count(), 0);
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_fallback_to_next_bucket() {
     // Test that when a bucket is exhausted, we fall back to the next larger bucket
     // Create pool with small memory budget to ensure limited buffers per bucket
@@ -1047,7 +1046,7 @@ mod bucketed_pool_tests {
     assert_eq!(buf3.len(), 100, "should get from 100-byte bucket again after release");
   }
 
-  #[tokio::test]
+  #[monoio::test]
   async fn test_excessive_budget_all_buckets_capped() {
     // Test scenario where budget is so large that all buckets hit max_buffers cap
     // This verifies that excess budget is properly handled and doesn't cause issues

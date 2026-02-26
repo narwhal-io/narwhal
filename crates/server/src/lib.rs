@@ -111,7 +111,7 @@ pub async fn run(config_file: Option<String>) -> anyhow::Result<()> {
   let mut c2s_ln = c2s::C2sListener::new(c2s_config.listener.clone(), c2s_conn_mng, c2s_dispatcher_factory);
 
   // Start routing task for modulator private payloads.
-  let mut route_m2s_payload_handle = Option::<(compio::runtime::JoinHandle<()>, async_channel::Sender<()>)>::None;
+  let mut route_m2s_payload_handle = Option::<(monoio::task::JoinHandle<()>, async_channel::Sender<()>)>::None;
 
   if let Some(m2s_payload_rx) = modulator_service.m2s_payload_rx.take() {
     route_m2s_payload_handle = Some(c2s::route_m2s_private_payload(m2s_payload_rx, c2s_router));
@@ -181,10 +181,9 @@ fn load_config(config_file: Option<String>) -> anyhow::Result<Config> {
 }
 
 async fn wait_for_stop_signal() -> anyhow::Result<()> {
-  let sig_term = compio_signal::unix::signal(libc::SIGTERM);
+  let sig_term = monoio::utils::CtrlC::new().expect("failed to create SIGTERM handler");
 
   select! {
-    _ = compio_signal::ctrl_c().fuse() => Ok(()),
     _ = sig_term.fuse() => Ok(()),
   }
 }

@@ -1,0 +1,3 @@
+# Enforce single-threaded test execution.
+[env]
+RUST_TEST_THREADS = "1"

@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_lock::Mutex;
 
 use narwhal_client::S2mConfig;
-use narwhal_client::compio::s2m::S2mClient;
+use narwhal_client::monoio::s2m::S2mClient;
 use narwhal_modulator::create_s2m_listener;
 use narwhal_modulator::modulator::{AuthResult, ForwardBroadcastPayloadResult, SendPrivatePayloadResult};
 use narwhal_modulator::{OutboundPrivatePayload, create_m2s_listener};
@@ -30,7 +30,7 @@ const TEST_USER_3: &str = "test_user_3";
 
 const SHARED_SECRET: &str = "a_secret";
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_modulator_single_step_auth() -> anyhow::Result<()> {
   let modulator = TestModulator::new()
     .with_auth_handler(|_| async { Ok(AuthResult::Success { username: StringAtom::from("test_user") }) });
@@ -73,7 +73,7 @@ async fn test_c2s_modulator_single_step_auth() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_modulator_auth_failed() -> anyhow::Result<()> {
   let modulator = TestModulator::new().with_auth_handler(|_| async { Ok(AuthResult::Failure) });
 
@@ -115,7 +115,7 @@ async fn test_c2s_modulator_auth_failed() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_modulator_multi_step_auth() -> anyhow::Result<()> {
   let modulator = TestModulator::new().with_auth_handler(|token| async move {
     if token.as_ref() == "initial_token" {
@@ -179,7 +179,7 @@ async fn test_c2s_modulator_multi_step_auth() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_modulator_send_private_payload() -> anyhow::Result<()> {
   // Create a modulator that validates private payloads - only accepts messages that contain "valid"
   let modulator = TestModulator::new().with_send_private_payload_handler(|payload, _from| async move {
@@ -255,7 +255,7 @@ async fn test_c2s_modulator_send_private_payload() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_modulator_receive_private_payload() -> anyhow::Result<()> {
   const TEST_PRIVATE_PAYLOAD: &str = r#"{"type":"test","message":"Hello from modulator"}"#;
 
@@ -340,7 +340,7 @@ async fn test_c2s_modulator_receive_private_payload() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_modulator_broadcast_payload_validation() -> anyhow::Result<()> {
   // Create a modulator that validates payloads - only accepts payloads that contain "valid"
   let modulator =
@@ -416,7 +416,7 @@ async fn test_c2s_modulator_broadcast_payload_validation() -> anyhow::Result<()>
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_modulator_broadcast_payload_alteration() -> anyhow::Result<()> {
   // Create a modulator that reverses the payload text
   let modulator =
@@ -506,7 +506,7 @@ async fn test_c2s_modulator_broadcast_payload_alteration() -> anyhow::Result<()>
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_modulator_forward_event() -> anyhow::Result<()> {
   // Create a modulator that captures events
   let captured_events = Arc::new(Mutex::new(Vec::new()));
@@ -622,7 +622,7 @@ async fn test_c2s_modulator_forward_event() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_modulator_channel_survives_single_connection_drop() -> anyhow::Result<()> {
   // Create a modulator that authenticates all connections as the same user
   let modulator = TestModulator::new()
@@ -694,7 +694,7 @@ async fn test_c2s_modulator_channel_survives_single_connection_drop() -> anyhow:
   drop(conn1);
 
   // Wait for the server to process the connection drop
-  compio::time::sleep(Duration::from_secs(1)).await;
+  monoio::time::sleep(Duration::from_secs(1)).await;
 
   // Second connection should still be able to list channels
   // and see that the user is still a member of the channel

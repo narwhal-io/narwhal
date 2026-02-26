@@ -159,7 +159,7 @@ impl ExponentialBackoff {
           };
 
           // Wait for the current delay before retrying
-          tokio::time::sleep(actual_delay).await;
+          monoio::time::sleep(actual_delay).await;
 
           // Calculate next delay with exponential backoff
           let next_delay = Duration::from_secs_f64(delay.as_secs_f64() * self.factor);
@@ -177,8 +177,8 @@ impl ExponentialBackoff {
 mod tests {
   use super::*;
   use std::sync::{Arc, Mutex};
+  use std::time::Duration;
   use std::time::Instant;
-  use tokio::time::Duration;
 
   // Helper struct to control operation behavior
   #[derive(Clone)]
@@ -241,7 +241,7 @@ mod tests {
     ExponentialBackoff::new().with_factor(1.0);
   }
 
-  #[tokio::test]
+  #[monoio::test(timer_enabled = true)]
   async fn test_success_on_first_attempt() {
     let backoff = ExponentialBackoff::new();
     let mock_op = MockOperation::new(0); // Succeed immediately
@@ -252,7 +252,7 @@ mod tests {
     assert_eq!(mock_op.call_count(), 1);
   }
 
-  #[tokio::test]
+  #[monoio::test(timer_enabled = true)]
   async fn test_success_after_retries() {
     let backoff = ExponentialBackoff::new().with_max_attempts(3).with_initial_delay(Duration::from_millis(10));
 
@@ -265,7 +265,7 @@ mod tests {
     assert_eq!(mock_op.call_count(), 3);
   }
 
-  #[tokio::test]
+  #[monoio::test(timer_enabled = true)]
   async fn test_all_attempts_fail() {
     let backoff = ExponentialBackoff::new().with_max_attempts(3).with_initial_delay(Duration::from_millis(5));
 
@@ -278,7 +278,7 @@ mod tests {
     assert_eq!(mock_op.call_count(), 3);
   }
 
-  #[tokio::test]
+  #[monoio::test(timer_enabled = true)]
   async fn test_exponential_backoff_timing() {
     let backoff =
       ExponentialBackoff::new().with_max_attempts(3).with_initial_delay(Duration::from_millis(20)).with_jitter(false); // Deterministic timing
@@ -294,7 +294,7 @@ mod tests {
     assert_eq!(mock_op.call_count(), 3);
   }
 
-  #[tokio::test]
+  #[monoio::test(timer_enabled = true)]
   async fn test_max_delay_cap() {
     let backoff = ExponentialBackoff::new()
             .with_max_attempts(3)

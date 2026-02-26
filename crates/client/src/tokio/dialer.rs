@@ -129,7 +129,6 @@ impl Dialer for TcpDialer {
   async fn dial(&self) -> anyhow::Result<Stream> {
     let tcp_stream =
       TcpStream::connect(&self.address).await.map_err(|e| anyhow!("failed to connect to {}: {}", self.address, e))?;
-
     tcp_stream.set_nodelay(true)?;
 
     Ok(Stream::Tcp(tcp_stream.compat()))
@@ -252,7 +251,6 @@ impl Dialer for TlsDialer {
   async fn dial(&self) -> anyhow::Result<tokio_util::compat::Compat<TlsStream<TcpStream>>> {
     let tcp_stream =
       TcpStream::connect(&self.address).await.map_err(|e| anyhow!("failed to connect to {}: {}", self.address, e))?;
-
     tcp_stream.set_nodelay(true)?;
 
     let tls_stream = self

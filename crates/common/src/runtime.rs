@@ -3,4 +3,4 @@
 /// Type alias for runtime task handles.
 ///
 /// This represents a spawned task that can be awaited or detached.
-pub type Task = compio::runtime::Task<Result<(), Box<dyn std::any::Any + Send>>, ()>;
+pub type Task = monoio::task::JoinHandle<()>;

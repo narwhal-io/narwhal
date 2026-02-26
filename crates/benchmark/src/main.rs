@@ -11,7 +11,7 @@ use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt, select};
 
 use async_lock::Mutex;
-use narwhal_client::compio::c2s::C2sClient;
+use narwhal_client::monoio::c2s::C2sClient;
 use narwhal_client::{AuthMethod, C2sConfig};
 use narwhal_protocol::Nid;
 use narwhal_protocol::{AclAction, AclType, QoS};
@@ -82,8 +82,8 @@ fn main() {
   info!("channel(s): {}", cli.channels);
   info!("duration: {:?}", cli.duration);
 
-  // Initialize compio runtime
-  let rt = compio::runtime::Runtime::new().unwrap();
+  // Initialize monoio runtime
+  let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new().enable_all().build().unwrap();
 
   // Run the benchmark
   rt.block_on(async {
@@ -156,14 +156,14 @@ impl BenchmarkMetrics {
 async fn spawn_inbound_drainers(
   clients: &[C2sClient],
   shutdown_rx: &async_channel::Receiver<()>,
-) -> Vec<compio::runtime::JoinHandle<u64>> {
+) -> Vec<monoio::task::JoinHandle<u64>> {
   let mut drainer_tasks = Vec::with_capacity(clients.len());
 
   for client in clients.iter() {
     let inbound_stream = client.inbound_stream().await;
     let shutdown = shutdown_rx.clone();
 
-    let drainer_task = compio::runtime::spawn(async move {
+    let drainer_task = monoio::spawn(async move {
       let mut count = 0u64;
       loop {
         select! {
@@ -361,7 +361,7 @@ async fn broadcast_messages(
     let client_pool = Pool::new(max_inflight_requests as usize, max_payload_size);
     let client_hist = arc_histogram.clone();
 
-    let task = compio::runtime::spawn(async move {
+    let task = monoio::spawn(async move {
       let mut count = 0u64;
       let mut channel_idx = 0usize;
 
@@ -413,7 +413,7 @@ async fn broadcast_messages(
 
   // Wait for all broadcast tasks to complete
   let results = join_all(broadcast_tasks).await;
-  let total_sent: u64 = results.into_iter().filter_map(|r| r.ok()).sum();
+  let total_sent: u64 = results.into_iter().sum();
 
   info!("total messages sent: {}", total_sent);
 
@@ -560,12 +560,9 @@ async fn perform_benchmark(cli: &Cli, metrics: &mut BenchmarkMetrics) -> Result<
   info!("collecting received message counts...");
   let mut total_received = 0u64;
   for task in drainer_tasks {
-    match compio::time::timeout(std::time::Duration::from_secs(5), task).await {
-      Ok(Ok(count)) => {
+    match monoio::time::timeout(std::time::Duration::from_secs(5), task).await {
+      Ok(count) => {
         total_received += count;
-      },
-      Ok(Err(e)) => {
-        warn!("drainer task panicked: {:?}", e);
       },
       Err(_) => {
         warn!("drainer task timed out after 5 seconds");

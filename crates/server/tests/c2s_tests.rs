@@ -22,7 +22,7 @@ const TEST_USER_3: &str = "test_user_3";
 const TEST_USER_4: &str = "test_user_4";
 const TEST_USER_5: &str = "test_user_5";
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_connect_timeout() -> anyhow::Result<()> {
   // Set the connection timeout to 50ms.
   let mut config = default_c2s_config();
@@ -35,7 +35,7 @@ async fn test_c2s_connect_timeout() -> anyhow::Result<()> {
   let mut tls_socket = suite.tls_socket_connect().await?;
 
   // Wait for the connection to timeout.
-  compio::time::sleep(Duration::from_millis(250)).await;
+  monoio::time::sleep(Duration::from_millis(250)).await;
 
   // Verify that the connection timed out and the server sent an error message.
   assert_message!(
@@ -53,7 +53,7 @@ async fn test_c2s_connect_timeout() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_authentication_timeout() -> anyhow::Result<()> {
   // Set the authentication timeout to 50ms.
   let mut config = default_c2s_config();
@@ -72,7 +72,7 @@ async fn test_c2s_authentication_timeout() -> anyhow::Result<()> {
   assert!(matches!(client_connected_msg, Message::ConnectAck { .. }));
 
   // Wait for the authentication to timeout.
-  compio::time::sleep(Duration::from_millis(250)).await;
+  monoio::time::sleep(Duration::from_millis(250)).await;
 
   // Verify that the server sent the proper error message.
   assert_message!(
@@ -90,7 +90,7 @@ async fn test_c2s_authentication_timeout() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_ping_timeout() -> anyhow::Result<()> {
   // Configure keep-alive parameters.
   let mut config = default_c2s_config();
@@ -104,13 +104,13 @@ async fn test_c2s_ping_timeout() -> anyhow::Result<()> {
   suite.identify(TEST_USER_1).await?;
 
   // Wait until ping is received.
-  compio::time::sleep(Duration::from_millis(150)).await;
+  monoio::time::sleep(Duration::from_millis(150)).await;
 
   let ping_msg = suite.read_message(TEST_USER_1).await?;
   assert!(matches!(ping_msg, Message::Ping { .. }));
 
   // Wait for keep-alive timeout.
-  compio::time::sleep(Duration::from_millis(200)).await;
+  monoio::time::sleep(Duration::from_millis(200)).await;
 
   // Verify that the server sent the proper error message.
   assert_message!(
@@ -128,7 +128,7 @@ async fn test_c2s_ping_timeout() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_unknown_message() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -155,7 +155,7 @@ async fn test_c2s_unknown_message() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_max_connection_limit_reached() -> anyhow::Result<()> {
   // Set the maximum number of streams to 1.
   let mut config = default_c2s_config();
@@ -177,11 +177,10 @@ async fn test_c2s_max_connection_limit_reached() -> anyhow::Result<()> {
   assert!(matches!(connect_ack, Message::ConnectAck { .. }));
 
   // Spawn task to keep the connection alive
-  compio::runtime::spawn(async move {
+  let _handle = monoio::spawn(async move {
     let _ = rx.await;
     tls_socket.shutdown().await.ok();
-  })
-  .detach();
+  });
 
   // Connect to the server again and expect an error.
   let mut tls_socket = suite.tls_socket_connect().await?;
@@ -204,7 +203,7 @@ async fn test_c2s_max_connection_limit_reached() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_max_message_size_exceeded() -> anyhow::Result<()> {
   // Set the maximum message size to 1024 bytes.
   let mut config = default_c2s_config();
@@ -241,7 +240,7 @@ async fn test_c2s_max_message_size_exceeded() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_max_subscriptions_reached() -> anyhow::Result<()> {
   // Set the maximum number of channels per client to 1.
   let mut config = default_c2s_config();
@@ -281,7 +280,7 @@ async fn test_c2s_max_subscriptions_reached() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_username_in_use() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -311,7 +310,7 @@ async fn test_c2s_username_in_use() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_join_on_behalf() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -359,7 +358,7 @@ async fn test_c2s_join_on_behalf() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_join_existing_channel() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -391,7 +390,7 @@ async fn test_c2s_join_existing_channel() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_join_full_channel() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -426,7 +425,7 @@ async fn test_c2s_join_full_channel() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_join_more_than_once() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -456,7 +455,7 @@ async fn test_c2s_join_more_than_once() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_leave() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -491,7 +490,7 @@ async fn test_c2s_leave() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_leave_on_behalf() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -543,7 +542,7 @@ async fn test_c2s_leave_on_behalf() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_leave_as_owner() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -590,7 +589,7 @@ async fn test_c2s_leave_as_owner() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_non_member_leave() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -626,7 +625,7 @@ async fn test_c2s_non_member_leave() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_list_members() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -684,7 +683,7 @@ async fn test_c2s_list_members() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_list_members_paginated() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -826,7 +825,7 @@ async fn test_c2s_list_members_paginated() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_list_channels() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -866,7 +865,7 @@ async fn test_c2s_list_channels() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_list_channels_as_owner() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -906,7 +905,7 @@ async fn test_c2s_list_channels_as_owner() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_list_channels_paginated() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1008,7 +1007,7 @@ async fn test_c2s_list_channels_paginated() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_leave_from_non_existing_channel() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1040,7 +1039,7 @@ async fn test_c2s_leave_from_non_existing_channel() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_channel_configuration() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1096,7 +1095,7 @@ async fn test_c2s_channel_configuration() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_unauthorized_channel_configuration() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1133,7 +1132,7 @@ async fn test_c2s_unauthorized_channel_configuration() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_channel_max_clients_configuration_limit() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1173,7 +1172,7 @@ async fn test_c2s_channel_max_clients_configuration_limit() -> anyhow::Result<()
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_channel_max_payload_configuration_limit() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1213,7 +1212,7 @@ async fn test_c2s_channel_max_payload_configuration_limit() -> anyhow::Result<()
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_channel_acl() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1338,7 +1337,7 @@ async fn test_c2s_channel_acl() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_channel_acl_paginated() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1533,7 +1532,7 @@ async fn test_c2s_channel_acl_paginated() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_channel_acl_max_entries() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1584,7 +1583,7 @@ async fn test_c2s_channel_acl_max_entries() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_channel_acl_join_deny() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1627,7 +1626,7 @@ async fn test_c2s_channel_acl_join_deny() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_broadcast() -> anyhow::Result<()> {
   const CONTENT_LENGTH: u32 = 12;
 
@@ -1687,7 +1686,7 @@ async fn test_c2s_broadcast() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_broadcast_invalid_payload() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1730,7 +1729,7 @@ async fn test_c2s_broadcast_invalid_payload() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_channel_acl_publish_deny() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1786,7 +1785,7 @@ async fn test_c2s_channel_acl_publish_deny() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_channel_acl_read_deny() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1843,7 +1842,7 @@ async fn test_c2s_channel_acl_read_deny() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_response_too_large() -> anyhow::Result<()> {
   let mut config = default_c2s_config();
   config.limits.max_message_size = 512; // Set a max message size to trigger RESPONSE_TOO_LARGE error.
@@ -1912,7 +1911,7 @@ async fn test_c2s_response_too_large() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_delete_channel_as_owner() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;
@@ -1965,7 +1964,7 @@ async fn test_c2s_delete_channel_as_owner() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_c2s_delete_channel_as_non_owner() -> anyhow::Result<()> {
   let mut suite = C2sSuite::new(default_c2s_config()).await?;
   suite.setup().await?;

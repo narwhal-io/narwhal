@@ -27,7 +27,7 @@ use crate::modulator::{
   AuthRequest, AuthResult, ForwardBroadcastPayloadRequest, ForwardBroadcastPayloadResult, ForwardEventRequest,
   Operation, OutboundPrivatePayload, ReceivePrivatePayloadRequest, SendPrivatePayloadRequest, SendPrivatePayloadResult,
 };
-use narwhal_client::compio::m2s::M2sClient;
+use narwhal_client::monoio::m2s::M2sClient;
 
 use crate::{M2sServerConfig, Modulator, S2mServerConfig};
 
@@ -37,7 +37,7 @@ pub type S2mConnManager = narwhal_common::conn::ConnManager<S2mService>;
 /// The M2S connection manager.
 pub type M2sConnManager = narwhal_common::conn::ConnManager<M2sService>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct M2sDispatcherFactory(Arc<RwLock<M2sDispatcherFactoryInner>>);
 
 // ===== impl M2sDispatcherFactory =====
@@ -67,7 +67,6 @@ impl narwhal_common::conn::DispatcherFactory<M2sDispatcher> for M2sDispatcherFac
   }
 }
 
-#[derive(Debug)]
 pub struct M2sDispatcherFactoryInner {
   /// The server configuration.
   config: Arc<M2sServerConfig>,
@@ -288,7 +287,6 @@ impl M2sDispatcher {
   }
 }
 
-#[derive(Debug)]
 pub struct S2mDispatcherFactory<M: Modulator>(Arc<RwLock<S2mDispatcherFactoryInner<M>>>);
 
 impl<M: Modulator> Clone for S2mDispatcherFactory<M> {
@@ -297,7 +295,6 @@ impl<M: Modulator> Clone for S2mDispatcherFactory<M> {
   }
 }
 
-#[derive(Debug)]
 pub struct S2mDispatcherFactoryInner<M: Modulator> {
   /// The server configuration.
   config: Arc<S2mServerConfig>,
@@ -309,13 +306,22 @@ pub struct S2mDispatcherFactoryInner<M: Modulator> {
   m2s_client: Option<M2sClient>,
 
   /// Handle to the private payload reader task.
-  payload_reader_handle: Option<compio::runtime::JoinHandle<()>>,
+  payload_reader_handle: Option<monoio::task::JoinHandle<()>>,
 
   /// Shutdown sender for graceful shutdown.
   shutdown_tx: async_channel::Sender<()>,
 
   /// Shutdown receiver for graceful shutdown.
   shutdown_rx: async_channel::Receiver<()>,
+}
+
+impl<M: Modulator> Debug for S2mDispatcherFactoryInner<M> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("S2mDispatcherFactoryInner")
+      .field("config", &self.config)
+      .field("m2s_client", &self.m2s_client)
+      .finish()
+  }
 }
 
 // ===== impl S2mDispatcherFactory =====
@@ -390,7 +396,7 @@ impl<M: Modulator> narwhal_common::conn::DispatcherFactory<S2mDispatcher<M>> for
       let rx = response.receiver;
       let shutdown_rx = inner.shutdown_rx.clone();
 
-      let handle = compio::runtime::spawn(Self::payload_reader_loop(rx, m2s_client.clone(), shutdown_rx));
+      let handle = monoio::spawn(Self::payload_reader_loop(rx, m2s_client.clone(), shutdown_rx));
       inner.payload_reader_handle = Some(handle);
     }
     Ok(())

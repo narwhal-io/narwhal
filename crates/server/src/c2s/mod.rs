@@ -38,17 +38,17 @@ use narwhal_protocol::{Message, ModDirectParameters};
 /// # Returns
 ///
 /// A tuple containing:
-/// * `compio::runtime::JoinHandle<()>` - A handle to the spawned routing task
+/// * `monoio::task::JoinHandle<()>` - A handle to the spawned routing task
 ///   that can be awaited for completion
 /// * `async_channel::Sender<()>` - A sender that can be closed to gracefully shut
 ///   down the routing task
 pub fn route_m2s_private_payload(
   m2s_payload_rx: async_broadcast::Receiver<OutboundPrivatePayload>,
   router: Router,
-) -> (compio::runtime::JoinHandle<()>, async_channel::Sender<()>) {
+) -> (monoio::task::JoinHandle<()>, async_channel::Sender<()>) {
   let (shutdown_tx, shutdown_rx) = async_channel::bounded::<()>(1);
 
-  let handle = compio::runtime::spawn(route_loop(m2s_payload_rx, router, shutdown_rx));
+  let handle = monoio::spawn(route_loop(m2s_payload_rx, router, shutdown_rx));
 
   (handle, shutdown_tx)
 }

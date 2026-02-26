@@ -10,19 +10,20 @@ use std::sync::Arc;
 use std::sync::atomic::{self, AtomicU32};
 use std::time::Duration;
 
-use ::compio::buf::{BufResult, IntoInner, IoBuf, IoBufMut};
-use ::compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use anyhow::anyhow;
 use async_channel::{Receiver, Sender, bounded};
 use async_lock::{Mutex, Semaphore};
 use futures::FutureExt;
 use futures_channel::oneshot;
+use monoio::BufResult;
+use monoio::buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut};
+use monoio::io::{AsyncReadRent, AsyncWriteRent, AsyncWriteRentExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, trace, warn};
 
 use narwhal_common::service::Service;
 use narwhal_protocol::{Message, PongParameters, deserialize, serialize};
-use narwhal_util::codec_compio::StreamReader;
+use narwhal_util::codec_monoio::StreamReader;
 use narwhal_util::pool::{MutablePoolBuffer, Pool, PoolBuffer};
 
 use super::dialer::Dialer;
@@ -30,7 +31,7 @@ use crate::config::{Config, SessionInfo};
 use crate::conn_state::{ErrorState, INBOUND_QUEUE_SIZE, OUTBOUND_QUEUE_SIZE, PendingRequest, PendingRequests};
 use crate::object_pool;
 
-/// A lock-free shared stream wrapper for compio's single-threaded runtime.
+/// A lock-free shared stream wrapper for a single-threaded io_uring runtime.
 ///
 /// Multiple clones of a `LocalStream` share the same underlying stream via
 /// `Rc<UnsafeCell<S>>`.
@@ -38,7 +39,7 @@ use crate::object_pool;
 /// # Safety
 ///
 /// Only safe within a **single-threaded**, cooperative async runtime like
-/// compio.  Because only one task ever executes at a time, the two halves
+/// monoio.  Because only one task ever executes at a time, the two halves
 /// (reader / writer) never actually access the inner stream concurrently.
 struct LocalStream<S>(Rc<UnsafeCell<S>>);
 
@@ -54,19 +55,27 @@ impl<S> Clone for LocalStream<S> {
   }
 }
 
-impl<S: AsyncRead + Unpin> AsyncRead for LocalStream<S> {
+impl<S: AsyncReadRent> AsyncReadRent for LocalStream<S> {
   async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
-    // SAFETY: compio is single-threaded and cooperative — only one task
-    // executes at any point, so no concurrent mutable access can occur.
     let stream = unsafe { &mut *self.0.get() };
     stream.read(buf).await
   }
+
+  async fn readv<B: IoVecBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+    let stream = unsafe { &mut *self.0.get() };
+    stream.readv(buf).await
+  }
 }
 
-impl<S: AsyncWrite + Unpin> AsyncWrite for LocalStream<S> {
+impl<S: AsyncWriteRent> AsyncWriteRent for LocalStream<S> {
   async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
     let stream = unsafe { &mut *self.0.get() };
     stream.write(buf).await
+  }
+
+  async fn writev<B: IoVecBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+    let stream = unsafe { &mut *self.0.get() };
+    stream.writev(buf).await
   }
 
   async fn flush(&mut self) -> std::io::Result<()> {
@@ -80,14 +89,14 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for LocalStream<S> {
   }
 }
 
-/// A trait for performing the protocol handshake over a compio stream.
+/// A trait for performing the protocol handshake over a monoio stream.
 ///
 /// The trait mirrors [`crate::tokio::common::Handshaker`] but operates
-/// on compio `AsyncRead + AsyncWrite` streams.
+/// on monoio `AsyncReadRent + AsyncWriteRent` streams.
 #[async_trait::async_trait(?Send)]
 pub trait Handshaker<S>: Clone + Send + Sync + 'static
 where
-  S: AsyncRead + AsyncWrite + Unpin,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
 {
   /// Extra metadata returned alongside [`SessionInfo`].
   type SessionExtraInfo: Clone + Send + Sync;
@@ -97,9 +106,9 @@ where
   async fn handshake(&self, stream: &mut S) -> anyhow::Result<(SessionInfo, Self::SessionExtraInfo)>;
 }
 
-/// Sends a request `message` over a compio stream and reads the response.
+/// Sends a request `message` over a monoio stream and reads the response.
 ///
-/// This is the compio-based counterpart of [`narwhal_protocol::request`]
+/// This is the monoio-based counterpart of [`narwhal_protocol::request`]
 /// (which targets futures-io).
 pub(crate) async fn request<S>(
   message: Message,
@@ -107,14 +116,14 @@ pub(crate) async fn request<S>(
   mut pool_buffer: MutablePoolBuffer,
 ) -> anyhow::Result<Message>
 where
-  S: AsyncRead + AsyncWrite + Unpin,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
 {
   // Serialize the request into the pool buffer.
   let n = serialize(&message, pool_buffer.as_mut_slice()).map_err(|e| anyhow!("failed to serialize message: {}", e))?;
 
   // Write to the stream.
   let data = pool_buffer.as_slice()[..n].to_vec();
-  let BufResult(result, _) = stream.write_all(data).await;
+  let (result, _) = stream.write_all(data).await;
   result?;
   stream.flush().await?;
 
@@ -152,7 +161,7 @@ impl ResponseHandle {
   pub async fn response(mut self) -> anyhow::Result<(Message, Option<PoolBuffer>)> {
     let rx = self.rx.take().expect("response() called twice");
 
-    match ::compio::time::timeout(self.timeout, rx).await {
+    match monoio::time::timeout(self.timeout, rx).await {
       Ok(Ok(result)) => result,
       Ok(Err(_)) => Err(anyhow!("response channel closed before receiving a response")),
       Err(_) => Err(anyhow!("request timed out")),
@@ -168,7 +177,7 @@ impl Drop for ResponseHandle {
   }
 }
 
-/// A Narwhal client that uses compio for compio-based I/O.
+/// A Narwhal client that uses monoio-based I/O.
 ///
 /// Modes are determined automatically by the [`Config::max_idle_connections`]
 /// value:
@@ -179,13 +188,13 @@ impl Drop for ResponseHandle {
 #[derive(Debug)]
 pub struct Client<S, HS, ST>(Arc<Mutex<ClientInner<S, HS, ST>>>)
 where
-  S: AsyncRead + AsyncWrite + Unpin + 'static,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
   HS: Handshaker<S>,
   ST: Service;
 
 impl<S, HS, ST> Clone for Client<S, HS, ST>
 where
-  S: AsyncRead + AsyncWrite + Unpin + 'static,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
   HS: Handshaker<S>,
   ST: Service,
 {
@@ -196,7 +205,7 @@ where
 
 impl<S, HS, ST> Client<S, HS, ST>
 where
-  S: AsyncRead + AsyncWrite + Unpin + 'static,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
   HS: Handshaker<S>,
   ST: Service,
 {
@@ -283,7 +292,7 @@ where
 
 struct ClientInner<S, HS, ST>
 where
-  S: AsyncRead + AsyncWrite + Unpin + 'static,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
   HS: Handshaker<S>,
   ST: Service,
 {
@@ -302,7 +311,7 @@ where
 
 impl<S, HS, ST> fmt::Debug for ClientInner<S, HS, ST>
 where
-  S: AsyncRead + AsyncWrite + Unpin + 'static,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
   HS: Handshaker<S>,
   ST: Service,
 {
@@ -313,7 +322,7 @@ where
 
 impl<S, HS, ST> ClientInner<S, HS, ST>
 where
-  S: AsyncRead + AsyncWrite + Unpin + 'static,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
   HS: Handshaker<S>,
   ST: Service,
 {
@@ -481,7 +490,7 @@ where
 
 struct ClientConnManager<S, HS, ST>
 where
-  S: AsyncRead + AsyncWrite + Unpin + 'static,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
   HS: Handshaker<S>,
   ST: Service,
 {
@@ -496,7 +505,7 @@ where
 
 impl<S, HS, ST> ClientConnManager<S, HS, ST>
 where
-  S: AsyncRead + AsyncWrite + Unpin + 'static,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
   HS: Handshaker<S>,
   ST: Service,
 {
@@ -521,7 +530,7 @@ where
 
 impl<S, HS, ST> object_pool::Manager for ClientConnManager<S, HS, ST>
 where
-  S: AsyncRead + AsyncWrite + Unpin + 'static,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
   HS: Handshaker<S>,
   ST: Service,
 {
@@ -567,14 +576,14 @@ where
   }
 }
 
-/// A single connection to a Narwhal server, driven by compio.
+/// A single connection to a Narwhal server, driven by monoio.
 ///
 /// The struct itself is `Send` (it holds only `Arc`, channels, tokens, …).
-/// The actual I/O tasks (reader + writer) live on the compio event loop of
+/// The actual I/O tasks (reader + writer) live on the monoio event loop of
 /// the thread that called [`connect`].
 struct ClientConn<S, HS, ST>
 where
-  S: AsyncRead + AsyncWrite + Unpin + 'static,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
   HS: Handshaker<S>,
   ST: Service,
 {
@@ -593,12 +602,12 @@ where
   _service_type: PhantomData<ST>,
 }
 
-// SAFETY: every field is Send.  The !Send I/O state (LocalStream, compio
-// tasks) lives exclusively inside detached compio tasks and is never stored
+// SAFETY: every field is Send.  The !Send I/O state (LocalStream, monoio
+// tasks) lives exclusively inside spawned monoio tasks and is never stored
 // in this struct.
 unsafe impl<S, HS, ST> Send for ClientConn<S, HS, ST>
 where
-  S: AsyncRead + AsyncWrite + Unpin + 'static,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
   HS: Handshaker<S>,
   ST: Service,
 {
@@ -606,7 +615,7 @@ where
 
 impl<S, HS, ST> ClientConn<S, HS, ST>
 where
-  S: AsyncRead + AsyncWrite + Unpin + 'static,
+  S: AsyncReadRent + AsyncWriteRent + 'static,
   HS: Handshaker<S>,
   ST: Service,
 {
@@ -636,9 +645,9 @@ where
   }
 
   /// Establishes the connection: dials, handshakes, then spawns reader and
-  /// writer tasks on the **current** compio event loop.
+  /// writer tasks on the **current** monoio event loop.
   ///
-  /// Must be called from within a compio runtime.
+  /// Must be called from within a monoio runtime.
   async fn connect(&mut self) -> anyhow::Result<()> {
     let mut stream = self.dialer.dial().await?;
 
@@ -677,7 +686,7 @@ where
     let writer_shutdown = self.shutdown_token.clone();
     let writer_msg_buf = message_pool.acquire_buffer().await;
 
-    ::compio::runtime::spawn(Self::writer_task(
+    monoio::spawn(Self::writer_task(
       writer_client_id,
       writer_conn_id,
       writer_stream,
@@ -685,15 +694,14 @@ where
       writer_msg_buf,
       writer_error_state,
       writer_shutdown,
-    ))
-    .detach();
+    ));
 
     self.writer_tx = Some(writer_tx.clone());
 
     // Spawn reader task
     let reader_msg_buf = message_pool.acquire_buffer().await;
 
-    ::compio::runtime::spawn(Self::reader_task(
+    monoio::spawn(Self::reader_task(
       self.client_id.clone(),
       self.conn_id,
       reader_stream,
@@ -705,8 +713,7 @@ where
       self.inbound_tx.clone(),
       self.shutdown_token.clone(),
       self.config.payload_read_timeout,
-    ))
-    .detach();
+    ));
 
     // Store session info
     self.session_info = Some((session_info, session_extra_info));
@@ -968,14 +975,14 @@ where
     let n = serialize(message, write_buffer).map_err(|e| anyhow!("failed to serialize message: {}", e))?;
 
     let data = write_buffer[..n].to_vec();
-    let BufResult(result, _) = writer.write_all(data).await;
+    let (result, _) = writer.write_all(data).await;
     result?;
 
     if let Some(payload) = payload_opt {
-      let BufResult(result, _) = writer.write_all(payload).await;
+      let (result, _) = writer.write_all(payload).await;
       result?;
 
-      let BufResult(result, _) = writer.write_all(vec![b'\n']).await;
+      let (result, _) = writer.write_all(vec![b'\n']).await;
       result?;
     }
 
@@ -993,7 +1000,7 @@ where
       Some(payload_info) => {
         let pool_buff = payload_pool.acquire_buffer().await;
 
-        match ::compio::time::timeout(
+        match monoio::time::timeout(
           payload_read_timeout,
           Self::read_payload(stream_reader, pool_buff, payload_info.length),
         )
@@ -1013,7 +1020,7 @@ where
     payload_length: usize,
   ) -> anyhow::Result<PoolBuffer> {
     // Read exactly `payload_length` bytes into a sub-slice of the pool buffer.
-    let payload_slice = pool_buff.slice(0..payload_length);
+    let payload_slice = pool_buff.slice_mut(0..payload_length);
     let payload_slice = stream_reader
       .read_raw(payload_slice, payload_length)
       .await
@@ -1031,7 +1038,7 @@ where
   }
 }
 
-/// Simple exponential-backoff helper using `compio::time::sleep`.
+/// Simple exponential-backoff helper using `monoio::time::sleep`.
 ///
 /// This replaces [`narwhal_util::backoff::ExponentialBackoff`] which is
 /// hard-wired to `tokio::time::sleep`.
@@ -1053,7 +1060,7 @@ where
       Ok(result) => return Ok(result),
       Err(e) => {
         last_error = Some(e);
-        ::compio::time::sleep(delay).await;
+        monoio::time::sleep(delay).await;
         let next = Duration::from_secs_f64(delay.as_secs_f64() * 1.5);
         delay = std::cmp::min(next, max_delay);
       },

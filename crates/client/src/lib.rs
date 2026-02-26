@@ -10,10 +10,10 @@
 //! matches your application's async runtime:
 //!
 //! - **[`tokio`]** — poll/readiness-based (Tokio)
-//! - **[`compio`]** — completion-based (compio)
+//! - **[`monoio`]** — completion-based (monoio)
 //!
 //! Import the client types you need directly from the corresponding module,
-//! e.g. `narwhal_client::tokio::C2sClient` or `narwhal_client::compio::C2sClient`.
+//! e.g. `narwhal_client::tokio::C2sClient` or `narwhal_client::monoio::C2sClient`.
 //!
 //! ## Client Types
 //!
@@ -42,7 +42,7 @@ pub(crate) mod config;
 pub(crate) mod conn_state;
 pub(crate) mod object_pool;
 
-pub mod compio;
+pub mod monoio;
 pub mod tokio;
 
 pub use auth::{AuthMethod, Authenticator, AuthenticatorFactory};

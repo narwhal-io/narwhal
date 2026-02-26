@@ -7,10 +7,11 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_broadcast;
 use async_channel;
-use compio::net::TcpStream;
-use compio_tls::{TlsConnector, TlsStream};
+use monoio::net::TcpStream;
+use monoio_rustls::{ClientTlsStream, TlsConnector};
+use pki_types::ServerName;
 
-use narwhal_client::compio::s2m::S2mClient;
+use narwhal_client::monoio::s2m::S2mClient;
 use narwhal_modulator::{Modulator, OutboundPrivatePayload};
 use narwhal_protocol::{
   AclAction, AclType, BroadcastParameters, ConnectParameters, IdentifyParameters, JoinChannelParameters,
@@ -23,6 +24,8 @@ use narwhal_server::router::GlobalRouter;
 use narwhal_util::string_atom::StringAtom;
 
 use crate::TestConn;
+
+type TlsStream = ClientTlsStream<TcpStream>;
 
 /// A test suite for the c2s server.
 pub struct C2sSuite {
@@ -39,10 +42,10 @@ pub struct C2sSuite {
   m2s_payload_rx: Option<async_broadcast::Receiver<OutboundPrivatePayload>>,
 
   /// The M2S payload router task handle.
-  m2s_router_task_handle: Option<(compio::runtime::JoinHandle<()>, async_channel::Sender<()>)>,
+  m2s_router_task_handle: Option<(monoio::task::JoinHandle<()>, async_channel::Sender<()>)>,
 
   /// Authenticated clients by username.
-  clients: HashMap<String, TestConn<TlsStream<TcpStream>>>,
+  clients: HashMap<String, TestConn<TlsStream>>,
 }
 
 // ===== impl C2sSuite =====
@@ -141,7 +144,7 @@ impl C2sSuite {
     Ok(())
   }
 
-  pub async fn tls_socket_connect(&self) -> anyhow::Result<TestConn<TlsStream<TcpStream>>> {
+  pub async fn tls_socket_connect(&self) -> anyhow::Result<TestConn<TlsStream>> {
     let domain = self.config.listener.domain.clone();
     assert_eq!(self.config.listener.domain, "localhost", "domain is not localhost");
 
@@ -152,7 +155,10 @@ impl C2sSuite {
     let client_config = crate::tls::make_tls_client_config();
     let connector = TlsConnector::from(client_config);
 
-    let tls_stream = connector.connect(&domain, tcp_stream).await?;
+    let server_name: ServerName<'static> =
+      ServerName::try_from(domain).map_err(|e| anyhow::anyhow!("invalid server name: {}", e))?;
+
+    let tls_stream = connector.connect(server_name, tcp_stream).await?;
 
     let max_message_size = self.config().limits.max_message_size as usize;
 
@@ -163,6 +169,7 @@ impl C2sSuite {
     Ok(tls_socket)
   }
 
+  #[allow(dead_code)]
   pub async fn identify(&mut self, username: &str) -> anyhow::Result<()> {
     let mut tls_socket = self.tls_socket_connect().await?;
 
@@ -328,7 +335,7 @@ impl C2sSuite {
     tls_socket.expect_read_timeout(timeout).await
   }
 
-  fn get_tls_socket(&mut self, username: &str) -> anyhow::Result<&mut TestConn<TlsStream<TcpStream>>> {
+  fn get_tls_socket(&mut self, username: &str) -> anyhow::Result<&mut TestConn<TlsStream>> {
     self.clients.get_mut(username).ok_or_else(|| anyhow!("client not found"))
   }
 }

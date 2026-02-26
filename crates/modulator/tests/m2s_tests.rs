@@ -7,7 +7,7 @@ use narwhal_protocol::{ErrorParameters, Message};
 use narwhal_test_util::{M2sSuite, assert_message, default_m2s_config};
 use narwhal_util::string_atom::StringAtom;
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_m2s_connect_timeout() -> anyhow::Result<()> {
   // Set the connection timeout to 50ms.
   let mut config = default_m2s_config();
@@ -20,7 +20,7 @@ async fn test_m2s_connect_timeout() -> anyhow::Result<()> {
   let mut socket = suite.socket_connect().await?;
 
   // Wait for the connection to timeout.
-  compio::time::sleep(Duration::from_millis(250)).await;
+  monoio::time::sleep(Duration::from_millis(250)).await;
 
   // Verify that the connection timed out and the server sent an error message.
   assert_message!(
@@ -38,7 +38,7 @@ async fn test_m2s_connect_timeout() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_m2s_ping_timeout() -> anyhow::Result<()> {
   // Configure keep-alive parameters.
   let mut config = default_m2s_config();
@@ -52,13 +52,13 @@ async fn test_m2s_ping_timeout() -> anyhow::Result<()> {
   let mut conn = suite.connect(None).await?;
 
   // Wait until ping is received.
-  compio::time::sleep(Duration::from_millis(150)).await;
+  monoio::time::sleep(Duration::from_millis(150)).await;
 
   let ping_msg = conn.read_message().await?;
   assert!(matches!(ping_msg, Message::Ping { .. }));
 
   // Wait for keep-alive timeout.
-  compio::time::sleep(Duration::from_millis(200)).await;
+  monoio::time::sleep(Duration::from_millis(200)).await;
 
   // Verify that the server sent the proper error message.
   assert_message!(
@@ -76,7 +76,7 @@ async fn test_m2s_ping_timeout() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_m2s_max_connection_limit_reached() -> anyhow::Result<()> {
   // Set the maximum number of connections to 1.
   let mut config = default_m2s_config();
@@ -107,7 +107,7 @@ async fn test_m2s_max_connection_limit_reached() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_m2s_max_message_size_exceeded() -> anyhow::Result<()> {
   // Set the maximum message size to 1024 bytes.
   let mut config = default_m2s_config();
@@ -144,7 +144,7 @@ async fn test_m2s_max_message_size_exceeded() -> anyhow::Result<()> {
   Ok(())
 }
 
-#[compio::test]
+#[monoio::test(enable_timer = true)]
 async fn test_m2s_mod_direct_message() -> anyhow::Result<()> {
   let mut suite = M2sSuite::with_config(default_m2s_config()).await;
   suite.setup().await?;
@@ -190,7 +190,7 @@ async fn test_m2s_mod_direct_message() -> anyhow::Result<()> {
       let payload_data = received.payload.as_slice();
       assert_eq!(payload_data, PAYLOAD);
     }
-    _ = compio::time::sleep(Duration::from_millis(100)).fuse() => {
+    _ = monoio::time::sleep(Duration::from_millis(100)).fuse() => {
       panic!("timeout waiting for outbound payload broadcast");
     }
   }

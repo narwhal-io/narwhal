@@ -58,7 +58,7 @@ impl Handshaker<Stream> for S2mHandshaker {
 }
 
 /// S2M client for connecting to a modulator server,
-/// using compio's compio-based I/O.
+/// using monoio-based I/O.
 #[derive(Clone, Debug)]
 pub struct S2mClient {
   client: Client<Stream, S2mHandshaker, S2mService>,
