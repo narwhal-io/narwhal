@@ -198,7 +198,15 @@ where
       self
         .core_dispatcher
         .dispatch_at_shard(shard_id, move || {
-          run_tcp_accept_loop(shard_id, bind_address, worker_listener, conn_rt, dispatcher_factory, ready_tx, shutdown_rx)
+          run_tcp_accept_loop(
+            shard_id,
+            bind_address,
+            worker_listener,
+            conn_rt,
+            dispatcher_factory,
+            ready_tx,
+            shutdown_rx,
+          )
         })
         .await?;
     }
@@ -239,7 +247,9 @@ where
 
     self
       .core_dispatcher
-      .dispatch_at_shard(0, move || run_unix_accept_loop(socket_path_str, conn_rt, dispatcher_factory, ready_tx, shutdown_rx))
+      .dispatch_at_shard(0, move || {
+        run_unix_accept_loop(socket_path_str, conn_rt, dispatcher_factory, ready_tx, shutdown_rx)
+      })
       .await?;
 
     let _ = ready_rx.recv().await;

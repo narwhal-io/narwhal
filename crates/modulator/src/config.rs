@@ -155,7 +155,6 @@ pub struct ListenerConfig {
   /// This is used when the network type is "unix".
   #[serde(default)]
   pub socket_path: String,
-
 }
 
 // === impl ListenerConfig ===

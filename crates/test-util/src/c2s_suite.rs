@@ -12,6 +12,7 @@ use monoio_rustls::{ClientTlsStream, TlsConnector};
 use pki_types::ServerName;
 
 use narwhal_client::monoio::s2m::S2mClient;
+use narwhal_common::core_dispatcher::CoreDispatcher;
 use narwhal_modulator::{Modulator, OutboundPrivatePayload};
 use narwhal_protocol::{
   AclAction, AclType, BroadcastParameters, ConnectParameters, IdentifyParameters, JoinChannelParameters,
@@ -21,7 +22,6 @@ use narwhal_server::c2s;
 use narwhal_server::channel::ChannelManager;
 use narwhal_server::notifier::Notifier;
 use narwhal_server::router::GlobalRouter;
-use narwhal_common::core_dispatcher::CoreDispatcher;
 use narwhal_util::string_atom::StringAtom;
 
 use crate::TestConn;

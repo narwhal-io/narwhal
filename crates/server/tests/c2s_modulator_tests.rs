@@ -8,9 +8,9 @@ use async_lock::Mutex;
 
 use narwhal_client::S2mConfig;
 use narwhal_client::monoio::s2m::S2mClient;
+use narwhal_common::core_dispatcher::CoreDispatcher;
 use narwhal_modulator::create_s2m_listener;
 use narwhal_modulator::modulator::{AuthResult, ForwardBroadcastPayloadResult, SendPrivatePayloadResult};
-use narwhal_common::core_dispatcher::CoreDispatcher;
 use narwhal_modulator::{OutboundPrivatePayload, create_m2s_listener};
 use narwhal_protocol::EventKind::{MemberJoined, MemberLeft};
 use narwhal_protocol::{
