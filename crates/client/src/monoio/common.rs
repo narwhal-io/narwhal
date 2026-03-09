@@ -109,7 +109,7 @@ where
 /// Sends a request `message` over a monoio stream and reads the response.
 ///
 /// This is the monoio-based counterpart of [`narwhal_protocol::request`]
-/// (which targets futures-io).
+/// (which targets `futures::io`).
 pub(crate) async fn request<S>(
   message: Message,
   stream: &mut S,
