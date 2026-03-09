@@ -12,8 +12,8 @@ use rustls::pki_types::ServerName;
 
 /// A trait for establishing network connections using monoio I/O.
 ///
-/// This is the monoio counterpart of [`narwhal_util::conn::Dialer`] which is
-/// built on futures-io / Tokio.
+/// This is the monoio counterpart of [`crate::tokio::dialer::Dialer`] which is
+/// built on Tokio.
 ///
 /// The trait itself is `Send + Sync` (so it can live inside an `Arc` shared
 /// across threads), but the returned future is `!Send` because monoio
