@@ -151,7 +151,7 @@ impl RouterShard {
 #[derive(Clone)]
 pub struct Router {
   local_domain: StringAtom,
-  mailboxes: Arc<Vec<Sender<Command>>>,
+  mailboxes: Arc<[Sender<Command>]>,
   total_connections: Arc<AtomicUsize>,
   mailbox_capacity: usize,
 }
@@ -166,12 +166,7 @@ impl Router {
 
   /// Creates a new `Router` with a custom mailbox capacity.
   pub fn with_mailbox_capacity(local_domain: StringAtom, mailbox_capacity: usize) -> Self {
-    Self {
-      local_domain,
-      mailboxes: Arc::new(Vec::new()),
-      total_connections: Arc::new(AtomicUsize::new(0)),
-      mailbox_capacity,
-    }
+    Self { local_domain, mailboxes: Arc::from([]), total_connections: Arc::new(AtomicUsize::new(0)), mailbox_capacity }
   }
 
   /// Spawns one shard actor per core on the given dispatcher.
@@ -191,7 +186,7 @@ impl Router {
         .await?;
     }
 
-    self.mailboxes = Arc::new(mailboxes);
+    self.mailboxes = Arc::from(mailboxes);
     Ok(())
   }
 
@@ -330,7 +325,7 @@ mod tests {
 
     Router {
       local_domain: StringAtom::from("localhost"),
-      mailboxes: Arc::new(vec![tx]),
+      mailboxes: Arc::from([tx]),
       total_connections,
       mailbox_capacity: 64,
     }
