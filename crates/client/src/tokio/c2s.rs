@@ -333,10 +333,10 @@ impl C2sClient {
   pub async fn configure_channel(
     &self,
     channel: StringAtom,
-    max_clients: u32,
-    max_payload_size: u32,
-    max_persist_messages: u32,
-    persist: bool,
+    max_clients: Option<u32>,
+    max_payload_size: Option<u32>,
+    max_persist_messages: Option<u32>,
+    persist: Option<bool>,
   ) -> crate::Result<()> {
     use narwhal_protocol::SetChannelConfigurationParameters;
 

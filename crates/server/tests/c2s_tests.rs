@@ -403,7 +403,7 @@ async fn test_c2s_join_full_channel() -> anyhow::Result<()> {
   suite.join_channel(TEST_USER_1, "!test1@localhost", None).await?;
 
   // Configure channel to allow only one client.
-  suite.configure_channel(TEST_USER_1, "!test1@localhost", 1, 8192).await?;
+  suite.configure_channel(TEST_USER_1, "!test1@localhost", Some(1), Some(8192)).await?;
 
   // Join to the existing channel.
   suite
@@ -1057,8 +1057,8 @@ async fn test_c2s_channel_configuration() -> anyhow::Result<()> {
       Message::SetChannelConfiguration(SetChannelConfigurationParameters {
         id: 1234,
         channel: StringAtom::from("!test1@localhost"),
-        max_clients: 25,
-        max_payload_size: 8192,
+        max_clients: Some(25),
+        max_payload_size: Some(8192),
         ..Default::default()
       }),
     )
@@ -1079,8 +1079,8 @@ async fn test_c2s_channel_configuration() -> anyhow::Result<()> {
       Message::SetChannelConfiguration(SetChannelConfigurationParameters {
         id: 1234,
         channel: StringAtom::from("!test1@localhost"),
-        max_clients: 25,
-        max_payload_size: 8192,
+        max_clients: Some(25),
+        max_payload_size: Some(8192),
         ..Default::default()
       }),
     )
@@ -1116,8 +1116,8 @@ async fn test_c2s_unauthorized_channel_configuration() -> anyhow::Result<()> {
       Message::SetChannelConfiguration(SetChannelConfigurationParameters {
         id: 1234,
         channel: StringAtom::from("!test1@localhost"),
-        max_clients: 25,
-        max_payload_size: 8192,
+        max_clients: Some(25),
+        max_payload_size: Some(8192),
         ..Default::default()
       }),
     )
@@ -1153,8 +1153,8 @@ async fn test_c2s_channel_max_clients_configuration_limit() -> anyhow::Result<()
       Message::SetChannelConfiguration(SetChannelConfigurationParameters {
         id: 1234,
         channel: StringAtom::from("!test1@localhost"),
-        max_clients: 200,
-        max_payload_size: 8192,
+        max_clients: Some(200),
+        max_payload_size: Some(8192),
         ..Default::default()
       }),
     )
@@ -1194,8 +1194,8 @@ async fn test_c2s_channel_max_payload_configuration_limit() -> anyhow::Result<()
       Message::SetChannelConfiguration(SetChannelConfigurationParameters {
         id: 1234,
         channel: StringAtom::from("!test1@localhost"),
-        max_clients: 25,
-        max_payload_size: 1_000 * 1024,
+        max_clients: Some(25),
+        max_payload_size: Some(1_000 * 1024),
         ..Default::default()
       }),
     )
@@ -1235,7 +1235,7 @@ async fn test_c2s_channel_max_persist_messages_configuration_limit() -> anyhow::
       Message::SetChannelConfiguration(SetChannelConfigurationParameters {
         id: 1234,
         channel: StringAtom::from("!test1@localhost"),
-        max_persist_messages: 200,
+        max_persist_messages: Some(200),
         ..Default::default()
       }),
     )
@@ -1275,7 +1275,7 @@ async fn test_c2s_channel_persist_configuration() -> anyhow::Result<()> {
       Message::SetChannelConfiguration(SetChannelConfigurationParameters {
         id: 1234,
         channel: StringAtom::from("!test1@localhost"),
-        persist: true,
+        persist: Some(true),
         ..Default::default()
       }),
     )
@@ -1313,7 +1313,7 @@ async fn test_c2s_channel_persist_configuration() -> anyhow::Result<()> {
       Message::SetChannelConfiguration(SetChannelConfigurationParameters {
         id: 1236,
         channel: StringAtom::from("!test1@localhost"),
-        persist: false,
+        persist: Some(false),
         ..Default::default()
       }),
     )
@@ -1681,7 +1681,7 @@ async fn test_c2s_channel_acl_max_entries() -> anyhow::Result<()> {
   suite.join_channel(TEST_USER_1, "!test1@localhost", None).await?;
 
   // Set channels max clients to 2.
-  suite.configure_channel(TEST_USER_1, "!test1@localhost", 2, 8192).await?;
+  suite.configure_channel(TEST_USER_1, "!test1@localhost", Some(2), Some(8192)).await?;
 
   // Set the channel ACL (exceeding the maximum number of entries).
   suite

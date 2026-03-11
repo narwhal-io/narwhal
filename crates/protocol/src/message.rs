@@ -512,10 +512,10 @@ pub struct SetChannelConfigurationParameters {
   #[param(validate = "non_empty")]
   pub channel: StringAtom,
 
-  pub max_clients: u32,
-  pub max_payload_size: u32,
-  pub max_persist_messages: u32,
-  pub persist: bool,
+  pub max_clients: Option<u32>,
+  pub max_payload_size: Option<u32>,
+  pub max_persist_messages: Option<u32>,
+  pub persist: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, ProtocolMessageParameters)]
