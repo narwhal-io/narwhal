@@ -5,11 +5,11 @@ use std::time::Duration;
 use narwhal_protocol::EventKind::{ChannelDeleted, MemberJoined, MemberLeft};
 use narwhal_protocol::{
   AclAction, AclType, BroadcastParameters, ChannelAclParameters, ConnectParameters, DeleteChannelAckParameters,
-  DeleteChannelParameters, ErrorParameters, EventParameters, GetChannelAclParameters, JoinChannelAckParameters,
-  JoinChannelParameters, LeaveChannelAckParameters, LeaveChannelParameters, ListChannelsAckParameters,
-  ListChannelsParameters, ListMembersAckParameters, ListMembersParameters, SetChannelAclAckParameters,
-  SetChannelAclParameters, SetChannelConfigurationAckParameters, SetChannelConfigurationParameters,
-  GetChannelConfigurationParameters,
+  DeleteChannelParameters, ErrorParameters, EventParameters, GetChannelAclParameters,
+  GetChannelConfigurationParameters, JoinChannelAckParameters, JoinChannelParameters, LeaveChannelAckParameters,
+  LeaveChannelParameters, ListChannelsAckParameters, ListChannelsParameters, ListMembersAckParameters,
+  ListMembersParameters, SetChannelAclAckParameters, SetChannelAclParameters, SetChannelConfigurationAckParameters,
+  SetChannelConfigurationParameters,
 };
 use narwhal_protocol::{IdentifyParameters, Message};
 use narwhal_test_util::{C2sSuite, assert_message, default_c2s_config};
