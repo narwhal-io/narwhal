@@ -852,7 +852,7 @@ async fn test_c2s_channel_persist_not_allowed_for_identified_users() -> anyhow::
     Message::Error,
     ErrorParameters {
       id: Some(1234),
-      reason: StringAtom::from("FORBIDDEN"),
+      reason: narwhal_protocol::ErrorReason::Forbidden.into(),
       detail: Some(StringAtom::from("persistence requires auth"))
     }
   );
