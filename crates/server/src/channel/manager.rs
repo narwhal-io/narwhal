@@ -213,15 +213,6 @@ impl<ML: MessageLog> Channel<ML> {
     self.owner == Some(nid.clone())
   }
 
-  fn pick_new_owner(&mut self) -> Option<Nid> {
-    if self.is_empty() {
-      return None;
-    }
-    let new_owner_nid = self.members.iter().next().unwrap().clone();
-    self.owner = Some(new_owner_nid.clone());
-    Some(new_owner_nid)
-  }
-
   fn is_member(&self, nid: &Nid) -> bool {
     self.members.contains(nid)
   }
@@ -355,7 +346,13 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
       channel.owner = persisted.owner;
       channel.acl = persisted.acl;
       channel.members = persisted.members;
-      channel.seq = channel.message_log.last_seq().await.unwrap_or(0) + 1;
+      channel.seq = match channel.message_log.last_seq().await {
+        Ok(seq) => seq + 1,
+        Err(e) => {
+          warn!(channel = %handler, error = %e, "skipping channel restore: failed to read last seq from message log");
+          continue;
+        },
+      };
       channel.update_allowed_targets();
 
       // Use u32::MAX to bypass the per-client limit: persisted membership is authoritative
@@ -628,7 +625,9 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
           self.membership.release_slot(&nid.username, handler).await;
           removed += 1;
         },
-        Ok(false) => {},
+        Ok(false) => {
+          self.membership.release_slot(&nid.username, handler).await;
+        },
         Err(e) => {
           warn!(channel = %handler, nid = %nid, error = %e, "failed to leave channel during batch disconnect");
         },
@@ -1066,14 +1065,17 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
     let as_owner = channel.is_owner(nid);
     let will_be_empty = channel.member_count() == 1;
 
+    // Pick the new owner once (if needed) so the same value is used for both
+    // the persisted projection and the in-memory update.
+    let new_owner =
+      if as_owner && !will_be_empty { Some(channel.members.iter().find(|m| *m != nid).unwrap().clone()) } else { None };
+
     // Persist the projected membership before any in-memory changes or notifications.
     // Skip when the channel will be empty.
     if channel.config.persist == Some(true) && !will_be_empty {
       let mut projected = channel.to_persisted();
       projected.members.remove(nid);
-      if as_owner {
-        projected.owner = projected.members.iter().next().cloned();
-      }
+      projected.owner = new_owner.clone().or(projected.owner);
       self.store.save_channel(&projected).await?;
     }
 
@@ -1095,9 +1097,9 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
       return Ok(true);
     }
 
-    if as_owner {
+    if let Some(new_owner) = new_owner {
       let channel = self.channels.get_mut(handler).unwrap();
-      let new_owner = channel.pick_new_owner().unwrap();
+      channel.owner = Some(new_owner.clone());
       if let Err(e) = channel.notify_member_joined(&new_owner, None, true, self.local_domain.clone()).await {
         warn!(channel = %handler, error = %e, "failed to notify new owner");
       }
