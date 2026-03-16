@@ -30,7 +30,7 @@ use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 
-use tracing::error;
+use tracing::warn;
 
 use crate::notifier::Notifier;
 use crate::router::GlobalRouter;
@@ -256,10 +256,6 @@ impl<ML: MessageLog> Channel<ML> {
     self.update_allowed_targets();
   }
 
-  fn merge_config(&mut self, config: &ChannelConfig) {
-    self.config = self.config.merge(config);
-  }
-
   fn update_allowed_targets(&mut self) {
     let acl = &self.acl;
     self.allowed_targets = self.members.iter().filter(|m| acl.is_read_allowed(m)).cloned().collect::<Vec<_>>().into();
@@ -314,7 +310,6 @@ impl<ML: MessageLog> Channel<ML> {
       config: self.config.clone(),
       acl: self.acl.clone(),
       members: self.members.clone(),
-      seq: self.seq,
     }
   }
 }
@@ -338,34 +333,41 @@ struct ChannelShard<CS: ChannelStore, MLF: MessageLogFactory> {
 
 impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
   async fn restore_and_run(mut self, handlers: Vec<StringAtom>) {
-    if let Err(e) = self.restore(handlers).await {
-      error!("failed to restore persisted channels: {}", e);
-    }
+    self.restore(handlers).await;
     while let Ok(cmd) = self.mailbox.recv().await {
       self.handle(cmd).await;
     }
   }
 
-  async fn restore(&mut self, handlers: Vec<StringAtom>) -> anyhow::Result<()> {
+  async fn restore(&mut self, handlers: Vec<StringAtom>) {
     for handler in &handlers {
-      let persisted = self.store.load_channel(handler).await?;
+      let persisted = match self.store.load_channel(handler).await {
+        Ok(p) => p,
+        Err(e) => {
+          warn!(channel = %handler, error = %e, "skipping channel restore: failed to load persisted channel");
+          continue;
+        },
+      };
+
       let message_log = self.message_log_factory.create(handler);
+
       let mut channel = Channel::new(handler.clone(), persisted.config, self.notifier.clone(), message_log);
       channel.owner = persisted.owner;
       channel.acl = persisted.acl;
       channel.members = persisted.members;
-      channel.seq = persisted.seq;
+      channel.seq = channel.message_log.last_seq().await.unwrap_or(0) + 1;
       channel.update_allowed_targets();
 
+      // Use u32::MAX to bypass the per-client limit: persisted membership is authoritative
+      // and limit changes should not retroactively evict members from their channels.
       for member in &channel.members {
-        self.membership.reserve_slot(&member.username, handler, self.limits.max_channels_per_client).await;
+        self.membership.reserve_slot(&member.username, handler, u32::MAX).await;
       }
 
       self.channels.insert(handler.clone(), channel);
       self.total_channels.fetch_add(1, Ordering::SeqCst);
       self.metrics.channels_active.inc();
     }
-    Ok(())
   }
 
   async fn handle(&mut self, cmd: Command) {
@@ -395,7 +397,8 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
         let _ = reply_tx.send(result).await;
       },
       Command::SetChannelAcl { channel_id, nid, nids, acl_type, acl_action, transmitter, correlation_id, reply_tx } => {
-        let result = self.set_channel_acl(channel_id, nid, nids, acl_type, acl_action, transmitter, correlation_id);
+        let result =
+          self.set_channel_acl(channel_id, nid, nids, acl_type, acl_action, transmitter, correlation_id).await;
         let _ = reply_tx.send(result).await;
       },
       Command::GetChannelConfiguration { channel_id, nid, transmitter, correlation_id, reply_tx } => {
@@ -461,6 +464,7 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
         if !channel.is_owner(&nid) {
           if as_owner {
             self.channels.remove(&handler);
+            self.total_channels.fetch_sub(1, Ordering::SeqCst);
           }
           self.metrics.channel_joins.get_or_create(&ResultLabel { result: "failure" }).inc();
           return Err(narwhal_protocol::Error::new(Forbidden).with_id(correlation_id).into());
@@ -468,6 +472,7 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
         if !self.router.c2s_router().has_connection(&behalf_nid.username).await {
           if as_owner {
             self.channels.remove(&handler);
+            self.total_channels.fetch_sub(1, Ordering::SeqCst);
           }
           self.metrics.channel_joins.get_or_create(&ResultLabel { result: "failure" }).inc();
           return Err(narwhal_protocol::Error::new(UserNotRegistered).with_id(correlation_id).into());
@@ -483,6 +488,7 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
     if !channel.acl.is_join_allowed(&new_member_nid) {
       if as_owner {
         self.channels.remove(&handler);
+        self.total_channels.fetch_sub(1, Ordering::SeqCst);
       }
       self.metrics.channel_joins.get_or_create(&ResultLabel { result: "failure" }).inc();
       return Err(narwhal_protocol::Error::new(NotAllowed).with_id(correlation_id).into());
@@ -491,6 +497,7 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
     if channel.is_member(&new_member_nid) {
       if as_owner {
         self.channels.remove(&handler);
+        self.total_channels.fetch_sub(1, Ordering::SeqCst);
       }
       self.metrics.channel_joins.get_or_create(&ResultLabel { result: "failure" }).inc();
       return Err(narwhal_protocol::Error::new(UserInChannel).with_id(correlation_id).into());
@@ -499,15 +506,17 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
     if channel.member_count() >= channel.config.max_clients.unwrap_or(0) as usize {
       if as_owner {
         self.channels.remove(&handler);
+        self.total_channels.fetch_sub(1, Ordering::SeqCst);
       }
       self.metrics.channel_joins.get_or_create(&ResultLabel { result: "failure" }).inc();
       return Err(narwhal_protocol::Error::new(ChannelIsFull).with_id(correlation_id).into());
     }
 
-    // All channel-level checks passed, now reserve the membership slot.
+    // Reserve the membership slot before persisting or mutating in-memory state.
     if !self.membership.reserve_slot(&new_member_nid.username, &handler, self.limits.max_channels_per_client).await {
       if as_owner {
         self.channels.remove(&handler);
+        self.total_channels.fetch_sub(1, Ordering::SeqCst);
       }
       self.metrics.channel_joins.get_or_create(&ResultLabel { result: "failure" }).inc();
       return Err(
@@ -518,16 +527,34 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
       );
     }
 
+    // Persist the projected membership before any in-memory changes.
+    {
+      let channel = self.channels.get(&handler).unwrap();
+      if channel.config.persist == Some(true) {
+        let mut projected = channel.to_persisted();
+        if projected.owner.is_none() {
+          projected.owner = Some(new_member_nid.clone());
+        }
+        projected.members.insert(new_member_nid.clone());
+        if let Err(e) = self.store.save_channel(&projected).await {
+          self.membership.release_slot(&new_member_nid.username, &handler).await;
+          if as_owner {
+            self.channels.remove(&handler);
+            self.total_channels.fetch_sub(1, Ordering::SeqCst);
+          }
+          self.metrics.channel_joins.get_or_create(&ResultLabel { result: "failure" }).inc();
+          return Err(e);
+        }
+      }
+    }
+
     let channel = self.channels.get_mut(&handler).unwrap();
     channel.insert_member(new_member_nid.clone());
-    channel
+    if let Err(e) = channel
       .notify_member_joined(&new_member_nid, Some(transmitter.resource()), as_owner, self.local_domain.clone())
-      .await?;
-
-    // Save updated membership to persistent storage.
-    let channel = self.channels.get(&handler).unwrap();
-    if channel.config.persist == Some(true) {
-      self.store.save_channel(&channel.to_persisted()).await?;
+      .await
+    {
+      warn!(channel = %handler, error = %e, "failed to notify member joined");
     }
 
     transmitter.send_message(Message::JoinChannelAck(JoinChannelAckParameters {
@@ -596,8 +623,15 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
     let mut removed = 0u64;
 
     for handler in &handlers {
-      if self.do_leave(handler, &nid, None).await? {
-        removed += 1;
+      match self.do_leave(handler, &nid, None).await {
+        Ok(true) => {
+          self.membership.release_slot(&nid.username, handler).await;
+          removed += 1;
+        },
+        Ok(false) => {},
+        Err(e) => {
+          warn!(channel = %handler, nid = %nid, error = %e, "failed to leave channel during batch disconnect");
+        },
       }
     }
 
@@ -635,11 +669,10 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
       self.membership.release_slot(username, &channel_id.handler).await;
     }
 
-    // Clean up persistent storage before removing the channel from memory.
-    let channel = self.channels.get_mut(&channel_id.handler).unwrap();
-    if channel.config.persist == Some(true) {
-      channel.message_log.delete().await?;
-      self.store.delete_channel(&channel_id.handler).await?;
+    // Clean up persistent storage. Best effort, must not block channel removal or leak slots.
+    let is_persistent = self.channels.get(&channel_id.handler).is_some_and(|c| c.config.persist == Some(true));
+    if is_persistent {
+      self.delete_persistent_storage(&channel_id.handler).await;
     }
 
     self.channels.remove(&channel_id.handler);
@@ -709,7 +742,6 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
     });
 
     if is_persistent {
-      let channel = self.channels.get_mut(&channel_id.handler).unwrap();
       channel.message_log.append(&msg, &payload, max_persist_messages).await?;
     }
 
@@ -778,7 +810,7 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
   }
 
   #[allow(clippy::too_many_arguments)]
-  fn set_channel_acl(
+  async fn set_channel_acl(
     &mut self,
     channel_id: ChannelId,
     nid: Nid,
@@ -815,6 +847,17 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
           .into(),
       );
     }
+
+    if channel.config.persist == Some(true) {
+      let mut projected = channel.to_persisted();
+      match acl_type {
+        AclType::Join => projected.acl.join_acl = new_acl.clone(),
+        AclType::Publish => projected.acl.publish_acl = new_acl.clone(),
+        AclType::Read => projected.acl.read_acl = new_acl.clone(),
+      }
+      self.store.save_channel(&projected).await?;
+    }
+
     channel.set_acl(new_acl, acl_type);
 
     transmitter.send_message(Message::SetChannelAclAck(SetChannelAclAckParameters { id: correlation_id }));
@@ -904,14 +947,19 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
     }
 
     let was_persistent = channel.config.persist == Some(true);
-    channel.merge_config(&config);
-    let is_persistent = channel.config.persist == Some(true);
+    let new_config = channel.config.merge(&config);
+    let is_persistent = new_config.persist == Some(true);
 
     if is_persistent {
-      self.store.save_channel(&channel.to_persisted()).await?;
-    } else if was_persistent {
-      channel.message_log.delete().await?;
-      self.store.delete_channel(&channel_id.handler).await?;
+      let mut projected = channel.to_persisted();
+      projected.config = new_config.clone();
+      self.store.save_channel(&projected).await?;
+    }
+
+    channel.config = new_config;
+
+    if !is_persistent && was_persistent {
+      self.delete_persistent_storage(&channel_id.handler).await;
     }
 
     transmitter
@@ -985,6 +1033,20 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
     Ok(())
   }
 
+  /// Best-effort cleanup of persistent storage for a channel (message log + store record).
+  /// Errors are logged but never propagated. Callers must not depend on storage cleanup
+  /// succeeding for in-memory consistency.
+  async fn delete_persistent_storage(&mut self, handler: &StringAtom) {
+    if let Some(channel) = self.channels.get_mut(handler)
+      && let Err(e) = channel.message_log.delete().await
+    {
+      warn!(channel = %handler, error = %e, "failed to delete persisted message log");
+    }
+    if let Err(e) = self.store.delete_channel(handler).await {
+      warn!(channel = %handler, error = %e, "failed to delete persisted channel");
+    }
+  }
+
   /// Performs the core leave logic: notify members, remove from channel, handle owner change
   /// or channel deletion. Returns `true` if the member was actually removed.
   async fn do_leave(
@@ -1002,16 +1064,30 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
     }
 
     let as_owner = channel.is_owner(nid);
+    let will_be_empty = channel.member_count() == 1;
 
-    channel.notify_member_left(nid, excluding_resource, as_owner, self.local_domain.clone()).await?;
+    // Persist the projected membership before any in-memory changes or notifications.
+    // Skip when the channel will be empty.
+    if channel.config.persist == Some(true) && !will_be_empty {
+      let mut projected = channel.to_persisted();
+      projected.members.remove(nid);
+      if as_owner {
+        projected.owner = projected.members.iter().next().cloned();
+      }
+      self.store.save_channel(&projected).await?;
+    }
+
+    if let Err(e) = channel.notify_member_left(nid, excluding_resource, as_owner, self.local_domain.clone()).await {
+      warn!(channel = %handler, error = %e, "failed to notify member left");
+    }
 
     let channel = self.channels.get_mut(handler).unwrap();
     channel.remove_member(nid);
 
     if channel.is_empty() {
-      if channel.config.persist == Some(true) {
-        channel.message_log.delete().await?;
-        self.store.delete_channel(handler).await?;
+      let is_persistent = channel.config.persist == Some(true);
+      if is_persistent {
+        self.delete_persistent_storage(handler).await;
       }
       self.channels.remove(handler);
       self.total_channels.fetch_sub(1, Ordering::SeqCst);
@@ -1022,13 +1098,9 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
     if as_owner {
       let channel = self.channels.get_mut(handler).unwrap();
       let new_owner = channel.pick_new_owner().unwrap();
-      channel.notify_member_joined(&new_owner, None, true, self.local_domain.clone()).await?;
-    }
-
-    // Save updated membership to persistent storage.
-    let channel = self.channels.get(handler).unwrap();
-    if channel.config.persist == Some(true) {
-      self.store.save_channel(&channel.to_persisted()).await?;
+      if let Err(e) = channel.notify_member_joined(&new_owner, None, true, self.local_domain.clone()).await {
+        warn!(channel = %handler, error = %e, "failed to notify new owner");
+      }
     }
 
     Ok(true)
@@ -1118,6 +1190,7 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelManager<CS, MLF> {
 
     // Load persisted channel handlers and group by shard.
     let handlers = self.store.load_channel_handlers().await?;
+
     let mut shard_handlers: Vec<Vec<StringAtom>> = vec![Vec::new(); shard_count];
     for handler in handlers.iter() {
       let shard_id = shard_for(handler, shard_count);
@@ -1237,9 +1310,6 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelManager<CS, MLF> {
     for reply_rx in reply_rxs {
       reply_rx.recv().await??;
     }
-
-    // All leaves succeeded, now release the membership slots.
-    self.membership.release_all_slots(&nid.username).await;
 
     Ok(())
   }
