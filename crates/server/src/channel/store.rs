@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -17,7 +17,7 @@ pub struct PersistedChannel {
   pub owner: Option<Nid>,
   pub config: ChannelConfig,
   pub acl: ChannelAcl,
-  pub members: HashSet<Nid>,
+  pub members: Rc<[Nid]>,
 }
 
 /// Storage backend for persisting channel metadata.
