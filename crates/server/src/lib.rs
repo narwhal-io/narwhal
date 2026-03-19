@@ -120,7 +120,11 @@ async fn run_server(
     NoopMessageLogFactory,
     channel_reg,
   );
-  channel_mng.bootstrap(&core_dispatcher).await?;
+  let auth_enabled = match &modulator_service.modulator {
+    Some(m) => m.operations().await?.contains(narwhal_modulator::modulator::Operation::Auth),
+    None => false,
+  };
+  channel_mng.bootstrap(&core_dispatcher, auth_enabled).await?;
 
   let c2s_reg = guard.sub_registry_with_prefix("narwhal_c2s");
 

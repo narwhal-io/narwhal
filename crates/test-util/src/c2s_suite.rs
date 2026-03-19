@@ -113,9 +113,14 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> C2sSuite<CS, MLF> {
 
     let mut registry = Registry::default();
 
+    let auth_enabled = match &modulator {
+      Some(m) => m.operations().await?.contains(narwhal_modulator::modulator::Operation::Auth),
+      None => false,
+    };
+
     let mut channel_mng =
       ChannelManager::new(global_router, notifier, channel_limits, channel_store, message_log_factory, &mut registry);
-    channel_mng.bootstrap(&core_dispatcher).await?;
+    channel_mng.bootstrap(&core_dispatcher, auth_enabled).await?;
 
     let conn_cfg = narwhal_common::conn::Config {
       max_connections: arc_config.limits.max_connections,
