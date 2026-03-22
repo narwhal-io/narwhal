@@ -13,6 +13,7 @@ use tracing::{error, info, trace, warn};
 
 use narwhal_common::conn::{ConnRuntime, Dispatcher, DispatcherFactory};
 use narwhal_common::core_dispatcher::CoreDispatcher;
+use narwhal_common::runtime;
 use narwhal_common::service::{M2sService, S2mService, Service};
 
 use prometheus_client::metrics::counter::Counter;
@@ -340,7 +341,7 @@ async fn run_tcp_accept_loop<D, DF, ST>(
             let conn_rt = conn_rt.clone();
             let dispatcher_factory = dispatcher_factory.clone();
 
-            monoio::spawn(async move {
+            let _ = runtime::spawn(async move {
               conn_rt.run_connection(tcp_stream, dispatcher_factory).await;
             });
           }
@@ -392,7 +393,7 @@ async fn run_unix_accept_loop<D, DF, ST>(
             let conn_rt = conn_rt.clone();
             let dispatcher_factory = dispatcher_factory.clone();
 
-            monoio::spawn(async move {
+            let _ = runtime::spawn(async move {
               conn_rt.run_connection(unix_stream, dispatcher_factory).await;
             });
           }

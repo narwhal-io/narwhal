@@ -12,6 +12,8 @@ use tracing::metadata::LevelFilter;
 use tracing::warn;
 use tracing_subscriber::fmt;
 
+use narwhal_common::runtime;
+
 /// A metrics registry that supports dynamic metric registration.
 pub type MetricsRegistry = Arc<async_lock::Mutex<Registry>>;
 
@@ -142,7 +144,7 @@ fn start_scrape_endpoint(config: &MetricsConfig, registry: MetricsRegistry) -> a
     TcpListener::from_std(std_listener)?
   };
 
-  monoio::spawn(async move {
+  let _ = runtime::spawn(async move {
     loop {
       match listener.accept().await {
         Ok((mut stream, _)) => {

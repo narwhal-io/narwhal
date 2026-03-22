@@ -6,6 +6,7 @@ compile_error!("This application strictly does not support Windows.");
 use clap::Parser;
 
 use narwhal_server::version::VERSION;
+use narwhal_common::runtime;
 
 /// Command line arguments
 #[derive(Parser, Debug)]
@@ -21,9 +22,7 @@ struct Cli {
 fn main() {
   narwhal_server::setup_panic_hook();
 
-  let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new().enable_all().build().unwrap();
-
-  rt.block_on(async {
+  runtime::block_on(async {
     let cli = Cli::parse();
 
     match narwhal_server::run(cli.config).await {

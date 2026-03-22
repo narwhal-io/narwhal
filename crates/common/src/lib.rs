@@ -2,4 +2,5 @@
 
 pub mod conn;
 pub mod core_dispatcher;
+pub mod runtime;
 pub mod service;

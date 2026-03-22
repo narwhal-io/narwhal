@@ -151,7 +151,7 @@ async fn run_server(
   drop(guard);
 
   // Start routing task for modulator private payloads.
-  let mut route_m2s_payload_handle = Option::<(monoio::task::JoinHandle<()>, async_channel::Sender<()>)>::None;
+  let mut route_m2s_payload_handle = Option::<(narwhal_common::core_dispatcher::Task, async_channel::Sender<()>)>::None;
 
   if let Some(m2s_payload_rx) = modulator_service.m2s_payload_rx.take() {
     route_m2s_payload_handle = Some(c2s::route_m2s_private_payload(m2s_payload_rx, c2s_router.clone()));

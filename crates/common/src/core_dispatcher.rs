@@ -10,10 +10,12 @@ use libc::{
 };
 use tracing::{error, info, trace, warn};
 
+use crate::runtime::{self, Runtime};
+
 /// Type alias for runtime task handles.
 ///
 /// This represents a spawned task that can be awaited or detached.
-pub type Task = monoio::task::JoinHandle<()>;
+pub type Task = <crate::runtime::CurrentRuntime as Runtime>::JoinHandle<()>;
 
 type SpawnFn = Box<dyn FnOnce() + Send + 'static>;
 
@@ -23,7 +25,7 @@ struct WorkerHandle {
   shutdown_tx: async_channel::Sender<()>,
 }
 
-/// A dispatcher that owns N OS threads, each running a monoio runtime pinned
+/// A dispatcher that owns N OS threads, each running a runtime pinned
 /// to a CPU core. Work is dispatched to a specific shard's runtime via
 /// `dispatch_at_shard`.
 #[derive(Clone)]
@@ -43,7 +45,7 @@ impl CoreDispatcher {
     Self { worker_count, senders: Arc::new(Vec::new()), handles: Arc::new(Mutex::new(Vec::new())) }
   }
 
-  /// Spawns worker threads, each with a monoio runtime pinned to a CPU core.
+  /// Spawns worker threads, each with a runtime pinned to a CPU core.
   ///
   /// Returns after all workers have signaled readiness.
   pub async fn bootstrap(&mut self) -> anyhow::Result<()> {
@@ -83,14 +85,9 @@ impl CoreDispatcher {
             let _ = core_affinity::set_for_current(core_id);
           }
 
-          let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
-            .enable_all()
-            .build()
-            .map_err(|e| anyhow!("failed to create monoio runtime for worker {}: {}", worker_id, e))?;
-
-          rt.block_on(async move {
+          runtime::block_on(async move {
             // Spawn a task that drains incoming work from the task channel.
-            monoio::spawn(async move {
+            let _ = runtime::spawn(async move {
               while let Ok(f) = task_rx.recv().await {
                 f();
               }
@@ -134,7 +131,7 @@ impl CoreDispatcher {
     Fut: std::future::Future<Output = ()> + 'static,
   {
     let task: SpawnFn = Box::new(move || {
-      monoio::spawn(f());
+      let _ = runtime::spawn(f());
     });
 
     self.senders[shard].send(task).await.map_err(|_| anyhow!("shard {} channel closed", shard))

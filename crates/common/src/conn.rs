@@ -3,6 +3,7 @@
 use core::fmt::Debug;
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::future::Future;
+#[cfg(feature = "runtime-monoio")]
 use std::io::Cursor;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -13,22 +14,32 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::FutureExt;
+#[cfg(feature = "runtime-monoio")]
 use monoio::BufResult;
+#[cfg(feature = "runtime-monoio")]
 use monoio::buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut};
+#[cfg(feature = "runtime-monoio")]
 use monoio::io::{AsyncReadRent, AsyncWriteRent, AsyncWriteRentExt};
 use rand::random;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
 
-use async_channel::{Receiver, Sender, TryRecvError, bounded};
+use async_channel::{Sender, TryRecvError, bounded};
+#[cfg(feature = "runtime-monoio")]
+use async_channel::Receiver;
 
 use slab::Slab;
 
 use narwhal_protocol::ErrorReason::{
-  BadRequest, InternalServerError, OutboundQueueIsFull, PolicyViolation, ResponseTooLarge, ServerShuttingDown, Timeout,
+  BadRequest, InternalServerError, OutboundQueueIsFull, PolicyViolation, ResponseTooLarge, Timeout,
 };
-use narwhal_protocol::{ErrorParameters, Message, PingParameters, SerializeError, deserialize, serialize};
+#[cfg(feature = "runtime-monoio")]
+use narwhal_protocol::ErrorReason::ServerShuttingDown;
+use narwhal_protocol::{ErrorParameters, Message, PingParameters, SerializeError, serialize};
+#[cfg(feature = "runtime-monoio")]
+use narwhal_protocol::deserialize;
 
+#[cfg(feature = "runtime-monoio")]
 use narwhal_util::codec_monoio::{StreamReader, StreamReaderError};
 
 use narwhal_util::pool::{BucketedPool, MutablePoolBuffer, Pool, PoolBuffer};
@@ -39,6 +50,7 @@ use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 
 use crate::core_dispatcher::Task;
+use crate::runtime;
 use crate::service::Service;
 
 const SERVER_OVERLOADED_ERROR: &[u8] = b"ERROR reason=SERVER_OVERLOADED detail=\\\"max connections reached\\\"\n";
@@ -67,6 +79,7 @@ impl<S> Clone for LocalStream<S> {
   }
 }
 
+#[cfg(feature = "runtime-monoio")]
 impl<S: AsyncReadRent> AsyncReadRent for LocalStream<S> {
   async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
     // SAFETY: single-threaded and cooperative – only one task
@@ -81,6 +94,7 @@ impl<S: AsyncReadRent> AsyncReadRent for LocalStream<S> {
   }
 }
 
+#[cfg(feature = "runtime-monoio")]
 impl<S: AsyncWriteRent> AsyncWriteRent for LocalStream<S> {
   async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
     let stream = unsafe { &mut *self.0.get() };
@@ -217,7 +231,9 @@ pub trait Dispatcher: 'static {
   /// # Errors
   ///
   /// If bootstrapping fails, the connection will be closed immediately.
-  async fn bootstrap(&mut self) -> anyhow::Result<()>;
+  async fn bootstrap(&mut self) -> anyhow::Result<()> {
+    Ok(())
+  }
 
   /// Cleans up the dispatcher's resources.
   ///
@@ -230,12 +246,9 @@ pub trait Dispatcher: 'static {
   ///
   /// * `Ok(())` - Shutdown succeeded
   /// * `Err(e)` - An error occurred during shutdown
-  ///
-  /// # Errors
-  ///
-  /// Errors during shutdown are logged but generally do not affect the
-  /// connection close process.
-  async fn shutdown(&mut self) -> anyhow::Result<()>;
+  async fn shutdown(&mut self) -> anyhow::Result<()> {
+    Ok(())
+  }
 }
 
 /// A factory for creating new `Dispatcher` instances.
@@ -273,7 +286,9 @@ pub trait DispatcherFactory<D: Dispatcher>: Clone + Send + Sync + 'static {
   ///
   /// * `Ok(())` - Bootstrap succeeded and the factory is ready to create dispatchers
   /// * `Err(e)` - An error occurred during bootstrap, preventing factory initialization
-  async fn bootstrap(&mut self) -> anyhow::Result<()>;
+  async fn bootstrap(&mut self) -> anyhow::Result<()> {
+    Ok(())
+  }
 
   /// Shuts down the dispatcher factory and cleans up resources.
   ///
@@ -284,7 +299,9 @@ pub trait DispatcherFactory<D: Dispatcher>: Clone + Send + Sync + 'static {
   ///
   /// * `Ok(())` - Shutdown succeeded
   /// * `Err(e)` - An error occurred during shutdown
-  async fn shutdown(&mut self) -> anyhow::Result<()>;
+  async fn shutdown(&mut self) -> anyhow::Result<()> {
+    Ok(())
+  }
 }
 
 /// The connection configuration.
@@ -489,7 +506,7 @@ impl<ST: Service> ConnRuntime<ST> {
         break;
       }
 
-      monoio::time::sleep(SHUTDOWN_DRAIN_POLL_INTERVAL).await;
+      runtime::sleep(SHUTDOWN_DRAIN_POLL_INTERVAL).await;
     }
 
     info!(service_type = ST::NAME, "connection runtime stopped");
@@ -498,6 +515,7 @@ impl<ST: Service> ConnRuntime<ST> {
   }
 
   /// Runs a single client connection to completion.
+  #[cfg(feature = "runtime-monoio")]
   pub async fn run_connection<S, D: Dispatcher, DF: DispatcherFactory<D>>(
     &self,
     mut stream: S,
@@ -749,14 +767,17 @@ impl<D: Dispatcher> Conn<D> {
     let task_slot = self.request_tasks.borrow().vacant_key();
     let request_tasks = self.request_tasks.clone();
 
-    let task = monoio::spawn(async move {
-      let timeout_future = monoio::time::timeout(request_timeout, future);
+    let task = runtime::spawn(async move {
+      let timeout_future = runtime::timeout(request_timeout, future);
+      let mut timeout_future = std::pin::pin!(timeout_future.fuse());
+      let mut cancelled = std::pin::pin!(cancellation_token.cancelled().fuse());
 
       futures::select! {
-        res = timeout_future.fuse() => {
+        res = timeout_future => {
           match res {
-            Ok(res) => {
-              if let Err(e) = res && let Err(e) = Self::notify_error::<ST>(e, tx, handler) {
+            Ok(Ok(_)) => {},
+            Ok(Err(e)) => {
+              if let Err(e) = Self::notify_error::<ST>(e, tx, handler) {
                 warn!(handler = handler, service_type = ST::NAME, "failed to notify request error: {}", e.to_string());
               }
             },
@@ -765,7 +786,7 @@ impl<D: Dispatcher> Conn<D> {
             }
           }
         },
-        _ = cancellation_token.cancelled().fuse() => {
+        _ = cancelled => {
           trace!(handler = handler, service_type = ST::NAME, "request cancelled");
         },
       }
@@ -792,12 +813,15 @@ impl<D: Dispatcher> Conn<D> {
     let tx = self.tx.clone();
     let (cancel_tx, cancel_rx) = bounded::<()>(1);
 
-    monoio::spawn(async move {
+    let _ = runtime::spawn(async move {
+      let mut sleep = std::pin::pin!(runtime::sleep(timeout).fuse());
+      let mut cancel = std::pin::pin!(cancel_rx.recv().fuse());
+
       futures::select! {
-        _ = monoio::time::sleep(timeout).fuse() => {
+        _ = sleep => {
           tx.close(Message::Error(ErrorParameters { id: None, reason: Timeout.into(), detail }));
         },
-        _ = cancel_rx.recv().fuse() => {},
+        _ = cancel => {},
       }
     });
 
@@ -821,15 +845,17 @@ impl<D: Dispatcher> Conn<D> {
     // Create cancellation channel (monoio JoinHandle drop doesn't cancel)
     let (cancel_tx, cancel_rx) = bounded::<()>(1);
 
-    monoio::spawn(async move {
+    let _ = runtime::spawn(async move {
+      let cancel_rx = cancel_rx;
       let mut cancel = std::pin::pin!(cancel_rx.recv().fuse());
       let mut last_check_counter = activity_counter.get();
 
       loop {
         // Sleep with cancellation
+        let mut sleep = std::pin::pin!(runtime::sleep(heartbeat_interval).fuse());
         futures::select! {
-          _ = monoio::time::sleep(heartbeat_interval).fuse() => {},
-          _ = cancel.as_mut() => break,
+          _ = sleep => {},
+          _ = cancel => break,
         }
 
         let current_counter = activity_counter.get();
@@ -844,8 +870,11 @@ impl<D: Dispatcher> Conn<D> {
         trace!(id = ping_id, handler, service_type = ST::NAME, "sent ping");
 
         // Wait for PONG or timeout, with cancellation
+        let pong_rx_recv = pong_rx.clone();
+        let timeout_fut = runtime::timeout(heartbeat_timeout, async move { pong_rx_recv.recv().await });
+        let mut timeout_fut = std::pin::pin!(timeout_fut.fuse());
         futures::select! {
-          result = monoio::time::timeout(heartbeat_timeout, pong_rx.recv()).fuse() => {
+          result = timeout_fut => {
             match result {
               Ok(Ok(pong_id)) if pong_id == ping_id => {
                 trace!(id = ping_id, "pong received");
@@ -870,7 +899,7 @@ impl<D: Dispatcher> Conn<D> {
               },
             }
           },
-          _ = cancel.as_mut() => break,
+          _ = cancel => break,
         }
       }
     });
@@ -928,6 +957,7 @@ impl<D: Dispatcher> Conn<D> {
   }
 
   #[allow(clippy::too_many_arguments)]
+  #[cfg(feature = "runtime-monoio")]
   async fn run<S, ST>(
     stream: S,
     conn: &mut Conn<D>,
@@ -1003,6 +1033,7 @@ impl<D: Dispatcher> Conn<D> {
   /// Sequentially reads from the stream, deserializes messages, reads payloads, and enforces rate limiting.
   /// Results are sent to the main connection loop to be processed.
   #[allow(clippy::too_many_arguments)]
+  #[cfg(feature = "runtime-monoio")]
   async fn run_read_loop<T>(
     mut stream_reader: StreamReader<LocalStream<T>>,
     read_tx: Sender<ReadResult>,
@@ -1046,9 +1077,9 @@ impl<D: Dispatcher> Conn<D> {
 
                 let pool_buff = payload_buffer_pool.acquire_buffer(payload_info.length).await.unwrap();
 
-                match monoio::time::timeout(
+                match runtime::timeout(
                   payload_read_timeout,
-                  Self::read_payload(
+                  Self::read_payload_with_reader(
                     pool_buff,
                     delimiter_buf,
                     &mut stream_reader,
@@ -1156,6 +1187,7 @@ impl<D: Dispatcher> Conn<D> {
   }
 
   #[allow(clippy::too_many_arguments)]
+  #[cfg(feature = "runtime-monoio")]
   async fn run_connection_loop<T, W, ST>(
     reader: LocalStream<T>,
     writer: &mut W,
@@ -1183,7 +1215,7 @@ impl<D: Dispatcher> Conn<D> {
     let (read_tx, read_rx) = bounded::<ReadResult>(READ_CHANNEL_CAPACITY);
 
     // Spawn the read loop as a separate task.
-    let reader_task = monoio::spawn(Self::run_read_loop(
+    let _reader_task = runtime::spawn(Self::run_read_loop(
       stream_reader,
       read_tx,
       payload_buffer_pool,
@@ -1200,9 +1232,13 @@ impl<D: Dispatcher> Conn<D> {
     let mut cancelled = std::pin::pin!(shutdown_token.cancelled().fuse());
 
     'connection_loop: loop {
+      let mut read_res = std::pin::pin!(read_rx.recv().fuse());
+      let mut send_msg_res = std::pin::pin!(send_msg_rx.recv().fuse());
+      let mut close_res = std::pin::pin!(close_rx.recv().fuse());
+
       futures::select! {
         // Receive parsed messages from the read loop.
-        res = read_rx.recv().fuse() => {
+        res = read_res => {
           match res {
             Ok(ReadResult::Message { message, payload }) => {
               match conn.dispatch_message::<ST>(message, payload).await {
@@ -1229,7 +1265,7 @@ impl<D: Dispatcher> Conn<D> {
         },
 
         // Write outbound messages to the stream.
-        res = send_msg_rx.recv().fuse() => {
+        res = send_msg_res => {
           const MESSAGE_CHANNEL_CLOSED_LOG: &str = "message channel closed";
 
           match res {
@@ -1263,7 +1299,7 @@ impl<D: Dispatcher> Conn<D> {
         },
 
         // Close the connection.
-        res = close_rx.recv().fuse() => {
+        res = close_res => {
           let err_message = res.unwrap();
           let _  = Self::write_message(&err_message, None, writer, message_buffer_pool.acquire_buffer().await, &newline_buffer, pool_buffer_batch, iovec_batch).await?;
           trace!(handler = handler, service_type = ST::NAME, "closed connection");
@@ -1271,7 +1307,7 @@ impl<D: Dispatcher> Conn<D> {
         },
 
         // Close the connection on shutdown.
-        _ = cancelled.as_mut() => {
+        _ = cancelled => {
           let err_message = Message::Error(ErrorParameters{id: None, reason: ServerShuttingDown.into(), detail: None});
           let _ = Self::write_message(&err_message, None, writer, message_buffer_pool.acquire_buffer().await, &newline_buffer, pool_buffer_batch, iovec_batch).await?;
           trace!(handler = handler, service_type = ST::NAME, "closed connection on shutdown");
@@ -1280,12 +1316,10 @@ impl<D: Dispatcher> Conn<D> {
       }
     }
 
-    // Stop polling the reader task.
-    drop(reader_task);
-
     Ok(())
   }
 
+  #[cfg(feature = "runtime-monoio")]
   async fn write_message<W>(
     message: &Message,
     payload_opt: Option<PoolBuffer>,
@@ -1309,6 +1343,7 @@ impl<D: Dispatcher> Conn<D> {
     Self::write_batch(batch, iovec_batch, writer).await
   }
 
+  #[cfg(feature = "runtime-monoio")]
   async fn write_batch<W>(
     mut batch: Vec<PoolBuffer>,
     mut iovec_batch: Vec<libc::iovec>,
@@ -1415,7 +1450,8 @@ impl<D: Dispatcher> Conn<D> {
     }
   }
 
-  async fn read_payload<B, T>(
+  #[cfg(feature = "runtime-monoio")]
+  async fn read_payload_with_reader<B, T>(
     mut buf: B,
     mut delimiter_buf: Box<[u8; 1]>,
     stream_reader: &mut StreamReader<LocalStream<T>>,
@@ -1444,6 +1480,7 @@ impl<D: Dispatcher> Conn<D> {
 }
 
 /// The result of reading a payload and its trailing delimiter.
+#[cfg(feature = "runtime-monoio")]
 struct PayloadReadResult<B> {
   /// The payload data buffer.
   data: B,
