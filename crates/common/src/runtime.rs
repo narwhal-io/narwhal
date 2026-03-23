@@ -32,7 +32,7 @@ pub trait Runtime: Clone + Send + Sync + 'static {
 }
 
 #[cfg(feature = "runtime-monoio")]
-/// A implementation of the `Runtime` trait for `monoio`.
+/// An implementation of the `Runtime` trait for `monoio`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MonoioRuntime;
 
@@ -75,8 +75,8 @@ impl Runtime for MonoioRuntime {
   }
 }
 
-#[cfg(not(feature = "runtime-monoio"))]
-compile_error!("Feature 'runtime-monoio' must be enabled for narwhal-common.");
+#[cfg(not(any(feature = "runtime-monoio")))]
+compile_error!("At least one runtime feature must be enabled for narwhal-common (e.g. 'runtime-monoio').");
 
 /// The currently configured runtime.
 #[cfg(feature = "runtime-monoio")]
