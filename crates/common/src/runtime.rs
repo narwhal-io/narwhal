@@ -52,11 +52,11 @@ impl Runtime for MonoioRuntime {
     monoio::time::sleep(duration)
   }
 
-  fn timeout<F>(&self, duration: Duration, future: F) -> impl Future<Output = Result<F::Output, ()>>
+  async fn timeout<F>(&self, duration: Duration, future: F) -> Result<F::Output, ()>
   where
     F: Future,
   {
-    async move { monoio::time::timeout(duration, future).await.map_err(|_| ()) }
+    monoio::time::timeout(duration, future).await.map_err(|_| ())
   }
 
   fn block_on<F>(&self, future: F) -> F::Output
@@ -72,7 +72,7 @@ impl Runtime for MonoioRuntime {
   }
 }
 
-#[cfg(all(not(feature = "runtime-monoio")))]
+#[cfg(not(feature = "runtime-monoio"))]
 compile_error!("Feature 'runtime-monoio' must be enabled for narwhal-common.");
 
 /// The currently configured runtime.

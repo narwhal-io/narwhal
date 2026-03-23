@@ -87,11 +87,11 @@ impl CoreDispatcher {
 
           runtime::block_on(async move {
             // Spawn a task that drains incoming work from the task channel.
-            let _ = runtime::spawn(async move {
+            drop(runtime::spawn(async move {
               while let Ok(f) = task_rx.recv().await {
                 f();
               }
-            });
+            }));
 
             // Signal readiness.
             let _ = ready_tx.send(()).await;
@@ -131,7 +131,7 @@ impl CoreDispatcher {
     Fut: std::future::Future<Output = ()> + 'static,
   {
     let task: SpawnFn = Box::new(move || {
-      let _ = runtime::spawn(f());
+      drop(runtime::spawn(f()));
     });
 
     self.senders[shard].send(task).await.map_err(|_| anyhow!("shard {} channel closed", shard))

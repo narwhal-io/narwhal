@@ -813,7 +813,7 @@ impl<D: Dispatcher> Conn<D> {
     let tx = self.tx.clone();
     let (cancel_tx, cancel_rx) = bounded::<()>(1);
 
-    let _ = runtime::spawn(async move {
+    drop(runtime::spawn(async move {
       let mut sleep = std::pin::pin!(runtime::sleep(timeout).fuse());
       let mut cancel = std::pin::pin!(cancel_rx.recv().fuse());
 
@@ -823,7 +823,7 @@ impl<D: Dispatcher> Conn<D> {
         },
         _ = cancel => {},
       }
-    });
+    }));
 
     self.scheduled_task = Some(cancel_tx);
   }
@@ -845,7 +845,7 @@ impl<D: Dispatcher> Conn<D> {
     // Create cancellation channel (monoio JoinHandle drop doesn't cancel)
     let (cancel_tx, cancel_rx) = bounded::<()>(1);
 
-    let _ = runtime::spawn(async move {
+    drop(runtime::spawn(async move {
       let cancel_rx = cancel_rx;
       let mut cancel = std::pin::pin!(cancel_rx.recv().fuse());
       let mut last_check_counter = activity_counter.get();
@@ -902,7 +902,7 @@ impl<D: Dispatcher> Conn<D> {
           _ = cancel => break,
         }
       }
-    });
+    }));
 
     self.scheduled_task = Some(cancel_tx);
   }

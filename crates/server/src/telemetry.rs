@@ -144,7 +144,7 @@ fn start_scrape_endpoint(config: &MetricsConfig, registry: MetricsRegistry) -> a
     TcpListener::from_std(std_listener)?
   };
 
-  let _ = runtime::spawn(async move {
+  drop(runtime::spawn(async move {
     loop {
       match listener.accept().await {
         Ok((mut stream, _)) => {
@@ -165,7 +165,7 @@ fn start_scrape_endpoint(config: &MetricsConfig, registry: MetricsRegistry) -> a
         },
       }
     }
-  });
+  }));
 
   Ok(())
 }
