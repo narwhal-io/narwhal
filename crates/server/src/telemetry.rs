@@ -12,6 +12,8 @@ use tracing::metadata::LevelFilter;
 use tracing::warn;
 use tracing_subscriber::fmt;
 
+use narwhal_common::runtime;
+
 /// A metrics registry that supports dynamic metric registration.
 pub type MetricsRegistry = Arc<async_lock::Mutex<Registry>>;
 
@@ -122,7 +124,7 @@ pub fn init(config: &Config) -> anyhow::Result<MetricsRegistry> {
   Ok(registry)
 }
 
-/// Spawns the Prometheus scrape endpoint on the current monoio runtime.
+/// Spawns the Prometheus scrape endpoint on the current async runtime.
 ///
 /// If metrics are disabled in the configuration, this is a no-op.
 fn start_scrape_endpoint(config: &MetricsConfig, registry: MetricsRegistry) -> anyhow::Result<()> {
@@ -142,7 +144,7 @@ fn start_scrape_endpoint(config: &MetricsConfig, registry: MetricsRegistry) -> a
     TcpListener::from_std(std_listener)?
   };
 
-  monoio::spawn(async move {
+  runtime::spawn_detached(async move {
     loop {
       match listener.accept().await {
         Ok((mut stream, _)) => {

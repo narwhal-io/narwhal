@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
+#[cfg(feature = "runtime-monoio")]
+mod monoio_io;
+
 use core::fmt::Debug;
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::future::Future;
@@ -13,9 +16,6 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::FutureExt;
-use monoio::BufResult;
-use monoio::buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut};
-use monoio::io::{AsyncReadRent, AsyncWriteRent, AsyncWriteRentExt};
 use rand::random;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
@@ -29,8 +29,6 @@ use narwhal_protocol::ErrorReason::{
 };
 use narwhal_protocol::{ErrorParameters, Message, PingParameters, SerializeError, deserialize, serialize};
 
-use narwhal_util::codec_monoio::{StreamReader, StreamReaderError};
-
 use narwhal_util::pool::{BucketedPool, MutablePoolBuffer, Pool, PoolBuffer};
 use narwhal_util::string_atom::StringAtom;
 
@@ -39,6 +37,7 @@ use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 
 use crate::core_dispatcher::Task;
+use crate::runtime;
 use crate::service::Service;
 
 const SERVER_OVERLOADED_ERROR: &[u8] = b"ERROR reason=SERVER_OVERLOADED detail=\\\"max connections reached\\\"\n";
@@ -53,7 +52,7 @@ const SERVER_OVERLOADED_ERROR: &[u8] = b"ERROR reason=SERVER_OVERLOADED detail=\
 /// Only safe within a **single-threaded**, cooperative async runtime.
 /// Because only one task ever executes at a time, the two halves
 /// never actually access the inner stream concurrently.
-struct LocalStream<S>(Rc<UnsafeCell<S>>);
+pub struct LocalStream<S>(Rc<UnsafeCell<S>>);
 
 impl<S> LocalStream<S> {
   fn new(stream: S) -> Self {
@@ -64,42 +63,6 @@ impl<S> LocalStream<S> {
 impl<S> Clone for LocalStream<S> {
   fn clone(&self) -> Self {
     LocalStream(Rc::clone(&self.0))
-  }
-}
-
-impl<S: AsyncReadRent> AsyncReadRent for LocalStream<S> {
-  async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
-    // SAFETY: single-threaded and cooperative – only one task
-    // executes at any point, so no concurrent mutable access can occur.
-    let stream = unsafe { &mut *self.0.get() };
-    stream.read(buf).await
-  }
-
-  async fn readv<B: IoVecBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
-    let stream = unsafe { &mut *self.0.get() };
-    stream.readv(buf).await
-  }
-}
-
-impl<S: AsyncWriteRent> AsyncWriteRent for LocalStream<S> {
-  async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
-    let stream = unsafe { &mut *self.0.get() };
-    stream.write(buf).await
-  }
-
-  async fn writev<B: IoVecBuf>(&mut self, buf: B) -> BufResult<usize, B> {
-    let stream = unsafe { &mut *self.0.get() };
-    stream.writev(buf).await
-  }
-
-  async fn flush(&mut self) -> std::io::Result<()> {
-    let stream = unsafe { &mut *self.0.get() };
-    stream.flush().await
-  }
-
-  async fn shutdown(&mut self) -> std::io::Result<()> {
-    let stream = unsafe { &mut *self.0.get() };
-    stream.shutdown().await
   }
 }
 
@@ -121,6 +84,61 @@ enum ReadResult {
   /// The contained message is always a [`Message::Error`] that the main loop
   /// should write to the wire before closing the connection.
   Error(Message),
+}
+
+/// Error from stream line-reading operations.
+pub enum ReadLineError {
+  /// A line exceeded the maximum allowed length.
+  MaxLineLengthExceeded,
+  /// An I/O error occurred.
+  Io(std::io::Error),
+}
+
+/// Abstracts line-oriented stream reading for the connection read loop.
+#[allow(async_fn_in_trait)]
+pub trait ConnStreamReader: 'static {
+  /// Reads the next line from the stream.
+  ///
+  /// Returns `true` if a line was read, `false` on EOF.
+  /// After returning `true`, call [`line()`](Self::line) to get the bytes.
+  async fn next(&mut self) -> Result<bool, ReadLineError>;
+
+  /// Returns the bytes of the last line read by [`next()`](Self::next).
+  fn line(&mut self) -> Option<&[u8]>;
+
+  /// Reads exactly `len` bytes of payload data followed by a newline delimiter.
+  async fn read_payload(
+    &mut self,
+    pool: &BucketedPool,
+    len: usize,
+    correlation_id: Option<u32>,
+  ) -> anyhow::Result<PoolBuffer>;
+}
+
+/// Abstracts stream writing for the connection write loop.
+#[allow(async_fn_in_trait)]
+pub trait ConnWriter {
+  /// Writes all buffers in the batch to the stream, flushes, then clears the batch.
+  async fn write_flush_batch(&mut self, batch: &mut Vec<PoolBuffer>) -> anyhow::Result<()>;
+
+  /// Shuts down the write side of the stream.
+  async fn shutdown(&mut self) -> std::io::Result<()>;
+}
+
+/// Bridges a raw stream into the runtime-agnostic [`ConnStreamReader`] and [`ConnWriter`] pair.
+#[allow(async_fn_in_trait)]
+pub trait ConnStreamFactory: Sized {
+  type Reader: ConnStreamReader;
+  type Writer: ConnWriter;
+
+  /// Constructs the reader/writer adapters from the raw stream.
+  async fn create(self, pool: &Pool) -> (Self::Reader, Self::Writer);
+
+  /// Writes an error message to the stream and shuts it down.
+  ///
+  /// Used for early rejection (e.g. max-connections reached) before
+  /// the reader/writer adapters are created.
+  async fn reject(self, error: &[u8]);
 }
 
 /// Represents the current state of a client connection in the protocol flow.
@@ -230,11 +248,6 @@ pub trait Dispatcher: 'static {
   ///
   /// * `Ok(())` - Shutdown succeeded
   /// * `Err(e)` - An error occurred during shutdown
-  ///
-  /// # Errors
-  ///
-  /// Errors during shutdown are logged but generally do not affect the
-  /// connection close process.
   async fn shutdown(&mut self) -> anyhow::Result<()>;
 }
 
@@ -489,7 +502,7 @@ impl<ST: Service> ConnRuntime<ST> {
         break;
       }
 
-      monoio::time::sleep(SHUTDOWN_DRAIN_POLL_INTERVAL).await;
+      runtime::sleep(SHUTDOWN_DRAIN_POLL_INTERVAL).await;
     }
 
     info!(service_type = ST::NAME, "connection runtime stopped");
@@ -498,23 +511,20 @@ impl<ST: Service> ConnRuntime<ST> {
   }
 
   /// Runs a single client connection to completion.
-  pub async fn run_connection<S, D: Dispatcher, DF: DispatcherFactory<D>>(
+  pub async fn run_connection<SF, D: Dispatcher, DF: DispatcherFactory<D>>(
     &self,
-    mut stream: S,
+    stream_factory: SF,
     mut dispatcher_factory: DF,
   ) where
-    S: AsyncReadRent + AsyncWriteRent + 'static,
+    SF: ConnStreamFactory,
   {
-    // Assign a unique handler
-    let handler = self.0.next_handler.fetch_add(1, Ordering::SeqCst);
+    let inner = &self.0;
 
-    let config = self.0.config.clone();
-    let message_buffer_pool = self.0.message_buffer_pool.clone();
-    let payload_buffer_pool = self.0.payload_buffer_pool.clone();
-    let newline_buffer = self.0.newline_buffer.clone();
-    let active_connections = self.0.active_connections.clone();
-    let shutdown_token = self.0.shutdown_token.clone();
-    let metrics = self.0.metrics.clone();
+    // Assign a unique handler
+    let handler = inner.next_handler.fetch_add(1, Ordering::SeqCst);
+    let config = inner.config.clone();
+    let active_connections = inner.active_connections.clone();
+    let metrics = inner.metrics.clone();
 
     // Check if we've reached the maximum number of connections
     let current_connections = active_connections.fetch_add(1, Ordering::SeqCst);
@@ -523,9 +533,7 @@ impl<ST: Service> ConnRuntime<ST> {
       active_connections.fetch_sub(1, Ordering::SeqCst);
       metrics.connections_rejected.inc();
 
-      let _ = stream.write_all(SERVER_OVERLOADED_ERROR.to_vec()).await;
-      let _ = stream.flush().await;
-      let _ = stream.shutdown().await;
+      stream_factory.reject(SERVER_OVERLOADED_ERROR).await;
 
       let max_conns = config.max_connections;
       warn!(max_conns, service_type = ST::NAME, "max connections limit reached");
@@ -545,41 +553,30 @@ impl<ST: Service> ConnRuntime<ST> {
 
     let dispatcher = dispatcher_factory.create(handler, tx.clone()).await;
 
-    let mut conn = Box::new(Conn {
-      handler,
-      config: config.clone(),
-      state: State::Connecting,
-      dispatcher: Rc::new(UnsafeCell::new(dispatcher)),
-      request_tasks: Rc::new(RefCell::new(Slab::with_capacity(config.max_inflight_requests as usize))),
-      cancellation_token: CancellationToken::new(),
-      activity_counter: Rc::new(Cell::new(0)),
-      pong_notifier: None,
-      scheduled_task: None,
-      inflight_requests: Rc::new(Cell::new(0)),
-      tx,
-    });
+    let mut conn = Conn::new(handler, config.clone(), dispatcher, tx);
 
     conn.schedule_timeout(config.connect_timeout, Some(StringAtom::from("connection timeout")));
 
     trace!(handler = handler, service_type = ST::NAME, "connection registered");
 
-    // Run loop until the connection is closed.
+    // Create runtime-specific reader and writer from the stream.
+    let (reader, mut writer) = SF::create(stream_factory, &inner.message_buffer_pool).await;
+
     let payload_read_timeout = config.payload_read_timeout;
-
     let max_payload_size = config.max_payload_size as usize;
-
     let rate_limit = config.rate_limit;
 
-    match Conn::<D>::run::<S, ST>(
-      stream,
+    match Conn::<D>::run::<_, _, ST>(
+      reader,
+      &mut writer,
       &mut conn,
       handler,
       send_msg_rx,
       close_rx,
-      shutdown_token,
-      message_buffer_pool,
-      payload_buffer_pool,
-      newline_buffer,
+      inner.shutdown_token.clone(),
+      inner.message_buffer_pool.clone(),
+      inner.payload_buffer_pool.clone(),
+      inner.newline_buffer.clone(),
       payload_read_timeout,
       max_payload_size,
       rate_limit,
@@ -641,6 +638,22 @@ pub struct Conn<D: Dispatcher> {
 // === impl Conn ===
 
 impl<D: Dispatcher> Conn<D> {
+  fn new(handler: usize, config: Arc<Config>, dispatcher: D, tx: ConnTx) -> Self {
+    Self {
+      handler,
+      state: State::Connecting,
+      dispatcher: Rc::new(UnsafeCell::new(dispatcher)),
+      request_tasks: Rc::new(RefCell::new(Slab::with_capacity(config.max_inflight_requests as usize))),
+      cancellation_token: CancellationToken::new(),
+      activity_counter: Rc::new(Cell::new(0)),
+      pong_notifier: None,
+      scheduled_task: None,
+      inflight_requests: Rc::new(Cell::new(0)),
+      config,
+      tx,
+    }
+  }
+
   async fn dispatch_message<ST: Service>(&mut self, msg: Message, payload: Option<PoolBuffer>) -> anyhow::Result<()> {
     let dispatcher = self.dispatcher.clone();
 
@@ -749,14 +762,17 @@ impl<D: Dispatcher> Conn<D> {
     let task_slot = self.request_tasks.borrow().vacant_key();
     let request_tasks = self.request_tasks.clone();
 
-    let task = monoio::spawn(async move {
-      let timeout_future = monoio::time::timeout(request_timeout, future);
+    let task = runtime::spawn(async move {
+      let timeout_future = runtime::timeout(request_timeout, future);
+      let mut timeout_future = std::pin::pin!(timeout_future.fuse());
+      let mut cancelled = std::pin::pin!(cancellation_token.cancelled().fuse());
 
       futures::select! {
-        res = timeout_future.fuse() => {
+        res = timeout_future => {
           match res {
-            Ok(res) => {
-              if let Err(e) = res && let Err(e) = Self::notify_error::<ST>(e, tx, handler) {
+            Ok(Ok(_)) => {},
+            Ok(Err(e)) => {
+              if let Err(e) = Self::notify_error::<ST>(e, tx, handler) {
                 warn!(handler = handler, service_type = ST::NAME, "failed to notify request error: {}", e.to_string());
               }
             },
@@ -765,7 +781,7 @@ impl<D: Dispatcher> Conn<D> {
             }
           }
         },
-        _ = cancellation_token.cancelled().fuse() => {
+        _ = cancelled => {
           trace!(handler = handler, service_type = ST::NAME, "request cancelled");
         },
       }
@@ -792,12 +808,15 @@ impl<D: Dispatcher> Conn<D> {
     let tx = self.tx.clone();
     let (cancel_tx, cancel_rx) = bounded::<()>(1);
 
-    monoio::spawn(async move {
+    runtime::spawn_detached(async move {
+      let mut sleep = std::pin::pin!(runtime::sleep(timeout).fuse());
+      let mut cancel = std::pin::pin!(cancel_rx.recv().fuse());
+
       futures::select! {
-        _ = monoio::time::sleep(timeout).fuse() => {
+        _ = sleep => {
           tx.close(Message::Error(ErrorParameters { id: None, reason: Timeout.into(), detail }));
         },
-        _ = cancel_rx.recv().fuse() => {},
+        _ = cancel => {},
       }
     });
 
@@ -821,15 +840,17 @@ impl<D: Dispatcher> Conn<D> {
     // Create cancellation channel (monoio JoinHandle drop doesn't cancel)
     let (cancel_tx, cancel_rx) = bounded::<()>(1);
 
-    monoio::spawn(async move {
+    runtime::spawn_detached(async move {
+      let cancel_rx = cancel_rx;
       let mut cancel = std::pin::pin!(cancel_rx.recv().fuse());
       let mut last_check_counter = activity_counter.get();
 
       loop {
         // Sleep with cancellation
+        let mut sleep = std::pin::pin!(runtime::sleep(heartbeat_interval).fuse());
         futures::select! {
-          _ = monoio::time::sleep(heartbeat_interval).fuse() => {},
-          _ = cancel.as_mut() => break,
+          _ = sleep => {},
+          _ = cancel => break,
         }
 
         let current_counter = activity_counter.get();
@@ -844,8 +865,11 @@ impl<D: Dispatcher> Conn<D> {
         trace!(id = ping_id, handler, service_type = ST::NAME, "sent ping");
 
         // Wait for PONG or timeout, with cancellation
+        let pong_rx_recv = pong_rx.clone();
+        let timeout_fut = runtime::timeout(heartbeat_timeout, async move { pong_rx_recv.recv().await });
+        let mut timeout_fut = std::pin::pin!(timeout_fut.fuse());
         futures::select! {
-          result = monoio::time::timeout(heartbeat_timeout, pong_rx.recv()).fuse() => {
+          result = timeout_fut => {
             match result {
               Ok(Ok(pong_id)) if pong_id == ping_id => {
                 trace!(id = ping_id, "pong received");
@@ -870,7 +894,7 @@ impl<D: Dispatcher> Conn<D> {
               },
             }
           },
-          _ = cancel.as_mut() => break,
+          _ = cancel => break,
         }
       }
     });
@@ -927,9 +951,55 @@ impl<D: Dispatcher> Conn<D> {
     Ok(())
   }
 
+  async fn add_message_to_batch(
+    message: &Message,
+    payload_opt: Option<PoolBuffer>,
+    batch: &mut Vec<PoolBuffer>,
+    message_buffer_pool: &Pool,
+    newline_buffer: &PoolBuffer,
+  ) -> anyhow::Result<()> {
+    let message_buff = Self::serialize_message(message, message_buffer_pool.acquire_buffer().await)?;
+    batch.push(message_buff);
+
+    if let Some(payload_buf) = payload_opt {
+      batch.push(payload_buf);
+      batch.push(newline_buffer.clone());
+    }
+    Ok(())
+  }
+
+  fn serialize_message(message: &Message, message_buffer: MutablePoolBuffer) -> anyhow::Result<PoolBuffer> {
+    Self::serialize_message_inner(message, message_buffer, true)
+      .map_err(|e| anyhow!("failed to serialize message: {}", e))
+  }
+
+  fn serialize_message_inner(
+    message: &Message,
+    mut message_buffer: MutablePoolBuffer,
+    handle_too_large: bool,
+  ) -> anyhow::Result<PoolBuffer> {
+    let write_buffer = message_buffer.as_mut_slice();
+
+    match serialize(message, write_buffer) {
+      Ok(n) => Ok(message_buffer.freeze(n)),
+      Err(SerializeError::MessageTooLarge) if handle_too_large => match message.correlation_id() {
+        Some(correlation_id) => {
+          let error_msg = narwhal_protocol::Error::new(ResponseTooLarge)
+            .with_id(correlation_id)
+            .with_detail(StringAtom::from("response exceeded maximum message size"));
+
+          Self::serialize_message_inner(&error_msg.into(), message_buffer, false)
+        },
+        None => Err(anyhow!(SerializeError::MessageTooLarge)),
+      },
+      Err(e) => Err(e.into()),
+    }
+  }
+
   #[allow(clippy::too_many_arguments)]
-  async fn run<S, ST>(
-    stream: S,
+  async fn run<R: ConnStreamReader, W: ConnWriter, ST: Service>(
+    reader: R,
+    writer: &mut W,
     conn: &mut Conn<D>,
     handler: usize,
     send_msg_rx: Receiver<(Message, Option<PoolBuffer>)>,
@@ -941,23 +1011,14 @@ impl<D: Dispatcher> Conn<D> {
     payload_read_timeout: Duration,
     max_payload_size: usize,
     rate_limit: u32,
-  ) -> anyhow::Result<()>
-  where
-    S: AsyncReadRent + AsyncWriteRent + 'static,
-    ST: Service,
-  {
-    let local_stream = LocalStream::new(stream);
-
-    let reader = local_stream.clone();
-    let mut writer = local_stream;
-
+  ) -> anyhow::Result<()> {
     // Bootstrap the connection.
     conn.bootstrap().await?;
 
     let loop_result = async {
-      Self::run_connection_loop::<_, _, ST>(
+      Self::run_connection_loop::<R, W, ST>(
         reader,
-        &mut writer,
+        writer,
         conn,
         handler,
         send_msg_rx,
@@ -998,13 +1059,142 @@ impl<D: Dispatcher> Conn<D> {
     Ok(())
   }
 
+  #[allow(clippy::too_many_arguments)]
+  async fn run_connection_loop<R: ConnStreamReader, W: ConnWriter, ST: Service>(
+    reader: R,
+    writer: &mut W,
+    conn: &mut Conn<D>,
+    handler: usize,
+    send_msg_rx: Receiver<(Message, Option<PoolBuffer>)>,
+    close_rx: Receiver<Message>,
+    shutdown_token: &CancellationToken,
+    message_buffer_pool: Pool,
+    payload_buffer_pool: BucketedPool,
+    newline_buffer: PoolBuffer,
+    payload_read_timeout: Duration,
+    max_payload_size: usize,
+    rate_limit: u32,
+  ) -> anyhow::Result<()> {
+    let (read_tx, read_rx) = bounded::<ReadResult>(READ_CHANNEL_CAPACITY);
+
+    // Spawn the read loop as a separate task.
+    // The task handle is dropped at scope exit to stop polling the reader.
+    let reader_task = runtime::spawn(Self::run_read_loop::<R>(
+      reader,
+      read_tx,
+      payload_buffer_pool,
+      payload_read_timeout,
+      max_payload_size,
+      rate_limit,
+      handler,
+      ST::NAME,
+    ));
+
+    let mut pool_buffer_batch = Vec::<PoolBuffer>::with_capacity(MAX_BUFFERS_PER_BATCH);
+
+    let mut cancelled = std::pin::pin!(shutdown_token.cancelled().fuse());
+
+    'connection_loop: loop {
+      let mut read_res = std::pin::pin!(read_rx.recv().fuse());
+      let mut send_msg_res = std::pin::pin!(send_msg_rx.recv().fuse());
+      let mut close_res = std::pin::pin!(close_rx.recv().fuse());
+
+      futures::select! {
+        // Receive parsed messages from the read loop.
+        res = read_res => {
+          match res {
+            Ok(ReadResult::Message { message, payload }) => {
+              match conn.dispatch_message::<ST>(message, payload).await {
+                Ok(_) => {},
+                Err(e) => {
+                  warn!(handler = handler, service_type = ST::NAME, "failed to dispatch message: {}", e.to_string());
+                  break 'connection_loop;
+                },
+              }
+            }
+            Ok(ReadResult::Eof) => {
+              trace!(handler = handler, service_type = ST::NAME, "connection closed by peer");
+              break 'connection_loop;
+            }
+            Ok(ReadResult::Error(err_message)) => {
+              Self::add_message_to_batch(&err_message, None, &mut pool_buffer_batch, &message_buffer_pool, &newline_buffer).await?;
+              writer.write_flush_batch(&mut pool_buffer_batch).await?;
+              break 'connection_loop;
+            }
+            Err(_) => {
+              // Read task exited unexpectedly.
+              break 'connection_loop;
+            }
+          }
+        },
+
+        // Write outbound messages to the stream.
+        res = send_msg_res => {
+          const MESSAGE_CHANNEL_CLOSED_LOG: &str = "message channel closed";
+
+          match res {
+            Ok((message, payload_opt)) => {
+              Self::add_message_to_batch(&message, payload_opt, &mut pool_buffer_batch, &message_buffer_pool, &newline_buffer).await?;
+            }
+            Err(_) => {
+              error!(handler = handler, service_type = ST::NAME, MESSAGE_CHANNEL_CLOSED_LOG);
+              break 'connection_loop;
+            }
+          };
+
+          loop {
+            if pool_buffer_batch.len() >= MAX_BUFFERS_PER_BATCH {
+                break;
+            }
+
+            match send_msg_rx.try_recv() {
+              Ok((message, payload_opt)) => {
+                Self::add_message_to_batch(&message, payload_opt, &mut pool_buffer_batch, &message_buffer_pool, &newline_buffer).await?;
+              },
+              Err(TryRecvError::Empty) => break,
+              Err(TryRecvError::Closed) => {
+                error!(handler = handler, service_type = ST::NAME, MESSAGE_CHANNEL_CLOSED_LOG);
+                break 'connection_loop;
+              }
+            }
+          }
+
+          writer.write_flush_batch(&mut pool_buffer_batch).await?;
+        },
+
+        // Close the connection.
+        res = close_res => {
+          let err_message = res.unwrap();
+          Self::add_message_to_batch(&err_message, None, &mut pool_buffer_batch, &message_buffer_pool, &newline_buffer).await?;
+          writer.write_flush_batch(&mut pool_buffer_batch).await?;
+          trace!(handler = handler, service_type = ST::NAME, "closed connection");
+          break 'connection_loop;
+        },
+
+        // Close the connection on shutdown.
+        _ = cancelled => {
+          let err_message = Message::Error(ErrorParameters{id: None, reason: ServerShuttingDown.into(), detail: None});
+          Self::add_message_to_batch(&err_message, None, &mut pool_buffer_batch, &message_buffer_pool, &newline_buffer).await?;
+          writer.write_flush_batch(&mut pool_buffer_batch).await?;
+          trace!(handler = handler, service_type = ST::NAME, "closed connection on shutdown");
+          break 'connection_loop;
+        },
+      }
+    }
+
+    // Stop polling the reader task.
+    drop(reader_task);
+
+    Ok(())
+  }
+
   /// Dedicated read loop spawned as a separate task.
   ///
   /// Sequentially reads from the stream, deserializes messages, reads payloads, and enforces rate limiting.
   /// Results are sent to the main connection loop to be processed.
   #[allow(clippy::too_many_arguments)]
-  async fn run_read_loop<T>(
-    mut stream_reader: StreamReader<LocalStream<T>>,
+  async fn run_read_loop<R: ConnStreamReader>(
+    mut reader: R,
     read_tx: Sender<ReadResult>,
     payload_buffer_pool: BucketedPool,
     payload_read_timeout: Duration,
@@ -1012,18 +1202,14 @@ impl<D: Dispatcher> Conn<D> {
     rate_limit: u32,
     handler: usize,
     service_name: &'static str,
-  ) where
-    T: AsyncReadRent + AsyncWriteRent + 'static,
-  {
+  ) {
     let mut rate_limit_counter: u32 = 0;
     let mut rate_limit_last_check = std::time::Instant::now();
 
-    let mut delimiter_buf = Box::new([0u8; 1]);
-
     loop {
-      match stream_reader.next().await {
+      match reader.next().await {
         Ok(true) => {
-          let line_bytes = stream_reader.get_line().unwrap();
+          let line_bytes = reader.line().unwrap();
           let message_length = line_bytes.len() as u32;
 
           match deserialize(Cursor::new(line_bytes)) {
@@ -1044,23 +1230,14 @@ impl<D: Dispatcher> Conn<D> {
                 }
                 payload_length = payload_info.length as u32;
 
-                let pool_buff = payload_buffer_pool.acquire_buffer(payload_info.length).await.unwrap();
-
-                match monoio::time::timeout(
+                match runtime::timeout(
                   payload_read_timeout,
-                  Self::read_payload(
-                    pool_buff,
-                    delimiter_buf,
-                    &mut stream_reader,
-                    payload_info.length,
-                    payload_info.id,
-                  ),
+                  reader.read_payload(&payload_buffer_pool, payload_info.length, payload_info.id),
                 )
                 .await
                 {
-                  Ok(Ok(mut result)) => {
-                    payload_opt = Some(result.data.freeze(payload_info.length));
-                    delimiter_buf = result.delimiter;
+                  Ok(Ok(payload)) => {
+                    payload_opt = Some(payload);
                   },
                   Ok(Err(e)) => {
                     let err_message: Message = if let Some(e) = e.downcast_ref::<narwhal_protocol::Error>() {
@@ -1130,7 +1307,7 @@ impl<D: Dispatcher> Conn<D> {
         },
         Err(e) => {
           match e {
-            StreamReaderError::MaxLineLengthExceeded => {
+            ReadLineError::MaxLineLengthExceeded => {
               let err_message = Message::Error(ErrorParameters {
                 id: None,
                 reason: PolicyViolation.into(),
@@ -1138,7 +1315,7 @@ impl<D: Dispatcher> Conn<D> {
               });
               let _ = read_tx.send(ReadResult::Error(err_message)).await;
             },
-            StreamReaderError::IoError(e) => {
+            ReadLineError::Io(e) => {
               if e.kind() != std::io::ErrorKind::UnexpectedEof {
                 error!(
                   handler = handler,
@@ -1154,302 +1331,6 @@ impl<D: Dispatcher> Conn<D> {
       }
     }
   }
-
-  #[allow(clippy::too_many_arguments)]
-  async fn run_connection_loop<T, W, ST>(
-    reader: LocalStream<T>,
-    writer: &mut W,
-    conn: &mut Conn<D>,
-    handler: usize,
-    send_msg_rx: Receiver<(Message, Option<PoolBuffer>)>,
-    close_rx: Receiver<Message>,
-    shutdown_token: &CancellationToken,
-    message_buffer_pool: Pool,
-    payload_buffer_pool: BucketedPool,
-    newline_buffer: PoolBuffer,
-    payload_read_timeout: Duration,
-    max_payload_size: usize,
-    rate_limit: u32,
-  ) -> anyhow::Result<()>
-  where
-    T: AsyncReadRent + AsyncWriteRent + 'static,
-    W: AsyncWriteRent,
-    ST: Service,
-  {
-    // Initialize stream reader and hand it off to the read loop.
-    let read_pool_buffer = message_buffer_pool.acquire_buffer().await;
-    let stream_reader = StreamReader::with_pool_buffer(reader, read_pool_buffer);
-
-    let (read_tx, read_rx) = bounded::<ReadResult>(READ_CHANNEL_CAPACITY);
-
-    // Spawn the read loop as a separate task.
-    let reader_task = monoio::spawn(Self::run_read_loop(
-      stream_reader,
-      read_tx,
-      payload_buffer_pool,
-      payload_read_timeout,
-      max_payload_size,
-      rate_limit,
-      handler,
-      ST::NAME,
-    ));
-
-    let mut pool_buffer_batch = Vec::<PoolBuffer>::with_capacity(MAX_BUFFERS_PER_BATCH);
-    let mut iovec_batch = Vec::<libc::iovec>::with_capacity(MAX_BUFFERS_PER_BATCH);
-
-    let mut cancelled = std::pin::pin!(shutdown_token.cancelled().fuse());
-
-    'connection_loop: loop {
-      futures::select! {
-        // Receive parsed messages from the read loop.
-        res = read_rx.recv().fuse() => {
-          match res {
-            Ok(ReadResult::Message { message, payload }) => {
-              match conn.dispatch_message::<ST>(message, payload).await {
-                Ok(_) => {},
-                Err(e) => {
-                  warn!(handler = handler, service_type = ST::NAME, "failed to dispatch message: {}", e.to_string());
-                  break 'connection_loop;
-                },
-              }
-            }
-            Ok(ReadResult::Eof) => {
-              trace!(handler = handler, service_type = ST::NAME, "connection closed by peer");
-              break 'connection_loop;
-            }
-            Ok(ReadResult::Error(err_message)) => {
-              let _  = Self::write_message(&err_message, None, writer, message_buffer_pool.acquire_buffer().await, &newline_buffer, pool_buffer_batch, iovec_batch).await?;
-              break 'connection_loop;
-            }
-            Err(_) => {
-              // Read task exited unexpectedly.
-              break 'connection_loop;
-            }
-          }
-        },
-
-        // Write outbound messages to the stream.
-        res = send_msg_rx.recv().fuse() => {
-          const MESSAGE_CHANNEL_CLOSED_LOG: &str = "message channel closed";
-
-          match res {
-            Ok((message, payload_opt)) => {
-              Self::add_message_to_batch(&message, payload_opt, &mut pool_buffer_batch, &message_buffer_pool, &newline_buffer).await?;
-            }
-            Err(_) => {
-              error!(handler = handler, service_type = ST::NAME, MESSAGE_CHANNEL_CLOSED_LOG);
-              break 'connection_loop;
-            }
-          };
-
-          loop {
-            if pool_buffer_batch.len() >= MAX_BUFFERS_PER_BATCH {
-                break;
-            }
-
-            match send_msg_rx.try_recv() {
-              Ok((message, payload_opt)) => {
-                Self::add_message_to_batch(&message, payload_opt, &mut pool_buffer_batch, &message_buffer_pool, &newline_buffer).await?;
-              },
-              Err(TryRecvError::Empty) => break,
-              Err(TryRecvError::Closed) => {
-                error!(handler = handler, service_type = ST::NAME, MESSAGE_CHANNEL_CLOSED_LOG);
-                break 'connection_loop;
-              }
-            }
-          }
-
-          (pool_buffer_batch, iovec_batch) = Self::write_batch(pool_buffer_batch, iovec_batch, writer).await?;
-        },
-
-        // Close the connection.
-        res = close_rx.recv().fuse() => {
-          let err_message = res.unwrap();
-          let _  = Self::write_message(&err_message, None, writer, message_buffer_pool.acquire_buffer().await, &newline_buffer, pool_buffer_batch, iovec_batch).await?;
-          trace!(handler = handler, service_type = ST::NAME, "closed connection");
-          break 'connection_loop;
-        },
-
-        // Close the connection on shutdown.
-        _ = cancelled.as_mut() => {
-          let err_message = Message::Error(ErrorParameters{id: None, reason: ServerShuttingDown.into(), detail: None});
-          let _ = Self::write_message(&err_message, None, writer, message_buffer_pool.acquire_buffer().await, &newline_buffer, pool_buffer_batch, iovec_batch).await?;
-          trace!(handler = handler, service_type = ST::NAME, "closed connection on shutdown");
-          break 'connection_loop;
-        },
-      }
-    }
-
-    // Stop polling the reader task.
-    drop(reader_task);
-
-    Ok(())
-  }
-
-  async fn write_message<W>(
-    message: &Message,
-    payload_opt: Option<PoolBuffer>,
-    writer: &mut W,
-    message_buffer: MutablePoolBuffer,
-    newline_buffer: &PoolBuffer,
-    mut batch: Vec<PoolBuffer>,
-    iovec_batch: Vec<libc::iovec>,
-  ) -> anyhow::Result<(Vec<PoolBuffer>, Vec<libc::iovec>)>
-  where
-    W: AsyncWriteRent,
-  {
-    let message_buff = Self::serialize_message(message, message_buffer)?;
-    batch.push(message_buff);
-
-    if let Some(payload_buf) = payload_opt {
-      batch.push(payload_buf);
-      batch.push(newline_buffer.clone());
-    };
-
-    Self::write_batch(batch, iovec_batch, writer).await
-  }
-
-  async fn write_batch<W>(
-    mut batch: Vec<PoolBuffer>,
-    mut iovec_batch: Vec<libc::iovec>,
-    writer: &mut W,
-  ) -> anyhow::Result<(Vec<PoolBuffer>, Vec<libc::iovec>)>
-  where
-    W: AsyncWriteRent,
-  {
-    // Populate the pre-allocated iovec batch from the pool buffers.
-    iovec_batch.extend(batch.iter().map(|b| libc::iovec { iov_base: b.read_ptr() as *mut _, iov_len: b.bytes_init() }));
-
-    let mut remaining: usize = iovec_batch.iter().map(|v| v.iov_len).sum();
-
-    // Loop writev until every byte is out.
-    while remaining > 0 {
-      let (result, returned_iovecs) = writer.writev(iovec_batch).await;
-      let written = result?;
-
-      iovec_batch = returned_iovecs;
-
-      if written == 0 {
-        return Err(anyhow!("writev unable to make progress"));
-      }
-      remaining -= written;
-
-      if remaining == 0 {
-        break;
-      }
-
-      // Advance iovecs past the bytes just written.
-      let mut consumed = 0usize;
-      let mut to_skip = written;
-
-      for iovec in iovec_batch.iter_mut() {
-        if to_skip >= iovec.iov_len {
-          to_skip -= iovec.iov_len;
-          consumed += 1;
-        } else {
-          // SAFETY: we advance the pointer within the bounds of the
-          // original PoolBuffer, which is kept alive in `batch`.
-          iovec.iov_base = unsafe { (iovec.iov_base as *mut u8).add(to_skip) as *mut _ };
-          iovec.iov_len -= to_skip;
-          break;
-        }
-      }
-
-      // Remove fully-consumed entries so writev never sees leading
-      // zero-length iovecs (which some implementations return 0 for).
-      if consumed > 0 {
-        iovec_batch.drain(..consumed);
-      }
-    }
-
-    batch.clear();
-    iovec_batch.clear();
-
-    writer.flush().await?;
-
-    Ok((batch, iovec_batch))
-  }
-
-  async fn add_message_to_batch(
-    message: &Message,
-    payload_opt: Option<PoolBuffer>,
-    batch: &mut Vec<PoolBuffer>,
-    message_buffer_pool: &Pool,
-    newline_buffer: &PoolBuffer,
-  ) -> anyhow::Result<()> {
-    let message_buff = Self::serialize_message(message, message_buffer_pool.acquire_buffer().await)?;
-    batch.push(message_buff);
-
-    if let Some(payload_buf) = payload_opt {
-      batch.push(payload_buf);
-      batch.push(newline_buffer.clone());
-    }
-    Ok(())
-  }
-
-  fn serialize_message(message: &Message, message_buffer: MutablePoolBuffer) -> anyhow::Result<PoolBuffer> {
-    Self::serialize_message_inner(message, message_buffer, true)
-      .map_err(|e| anyhow!("failed to serialize message: {}", e))
-  }
-
-  fn serialize_message_inner(
-    message: &Message,
-    mut message_buffer: MutablePoolBuffer,
-    handle_too_large: bool,
-  ) -> anyhow::Result<PoolBuffer> {
-    let write_buffer = message_buffer.as_mut_slice();
-
-    match serialize(message, write_buffer) {
-      Ok(n) => Ok(message_buffer.freeze(n)),
-      Err(SerializeError::MessageTooLarge) if handle_too_large => match message.correlation_id() {
-        Some(correlation_id) => {
-          let error_msg = narwhal_protocol::Error::new(ResponseTooLarge)
-            .with_id(correlation_id)
-            .with_detail(StringAtom::from("response exceeded maximum message size"));
-
-          Self::serialize_message_inner(&error_msg.into(), message_buffer, false)
-        },
-        None => Err(anyhow!(SerializeError::MessageTooLarge)),
-      },
-      Err(e) => Err(e.into()),
-    }
-  }
-
-  async fn read_payload<B, T>(
-    mut buf: B,
-    mut delimiter_buf: Box<[u8; 1]>,
-    stream_reader: &mut StreamReader<LocalStream<T>>,
-    len: usize,
-    correlation_id: Option<u32>,
-  ) -> anyhow::Result<PayloadReadResult<B>>
-  where
-    B: IoBuf + IoBufMut,
-    T: AsyncReadRent + 'static,
-  {
-    buf = stream_reader.read_raw(buf, len).await?;
-
-    // Read last byte, and ensure it's a newline
-    delimiter_buf = stream_reader.read_raw(delimiter_buf, 1).await?;
-
-    if delimiter_buf[0] != b'\n' {
-      let mut error = narwhal_protocol::Error::new(BadRequest).with_detail(StringAtom::from("invalid payload format"));
-      if let Some(id) = correlation_id {
-        error = error.with_id(id);
-      }
-      return Err(error.into());
-    }
-
-    Ok(PayloadReadResult { data: buf, delimiter: delimiter_buf })
-  }
-}
-
-/// The result of reading a payload and its trailing delimiter.
-struct PayloadReadResult<B> {
-  /// The payload data buffer.
-  data: B,
-
-  /// The delimiter buffer.
-  delimiter: Box<[u8; 1]>,
 }
 
 /// The connection transmitter.

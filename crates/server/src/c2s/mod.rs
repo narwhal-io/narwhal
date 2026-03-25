@@ -5,6 +5,7 @@ use async_channel;
 use futures::{FutureExt, select};
 use tracing::warn;
 
+use narwhal_common::runtime;
 use narwhal_modulator::OutboundPrivatePayload;
 
 mod config;
@@ -38,17 +39,17 @@ use narwhal_protocol::{Message, ModDirectParameters};
 /// # Returns
 ///
 /// A tuple containing:
-/// * `monoio::task::JoinHandle<()>` - A handle to the spawned routing task
+/// * `narwhal_common::core_dispatcher::Task` - A handle to the spawned routing task
 ///   that can be awaited for completion
 /// * `async_channel::Sender<()>` - A sender that can be closed to gracefully shut
 ///   down the routing task
 pub fn route_m2s_private_payload(
   m2s_payload_rx: async_broadcast::Receiver<OutboundPrivatePayload>,
   router: Router,
-) -> (monoio::task::JoinHandle<()>, async_channel::Sender<()>) {
+) -> (narwhal_common::core_dispatcher::Task, async_channel::Sender<()>) {
   let (shutdown_tx, shutdown_rx) = async_channel::bounded::<()>(1);
 
-  let handle = monoio::spawn(route_loop(m2s_payload_rx, router, shutdown_rx));
+  let handle = runtime::spawn(route_loop(m2s_payload_rx, router, shutdown_rx));
 
   (handle, shutdown_tx)
 }

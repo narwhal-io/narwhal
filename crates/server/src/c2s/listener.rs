@@ -16,6 +16,7 @@ use rustls::ServerConfig;
 use tracing::{info, trace, warn};
 
 use narwhal_common::conn::DispatcherFactory;
+use narwhal_common::runtime;
 use narwhal_common::service::{C2sService, Service};
 
 use crate::c2s::config::ListenerConfig;
@@ -321,7 +322,7 @@ async fn run_accept_loop<CS: ChannelStore, MLF: MessageLogFactory>(
             let dispatcher_factory = dispatcher_factory.clone();
             let metrics = metrics.clone();
 
-            monoio::spawn(async move {
+            runtime::spawn_detached(async move {
               match acceptor.accept(tcp_stream).await {
                 std::result::Result::Ok(tls_stream) => {
                   trace!(worker_id, %remote_addr, "TLS handshake complete");
