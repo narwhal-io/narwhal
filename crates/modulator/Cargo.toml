@@ -24,4 +24,5 @@ narwhal-util = { path = "../util" }
 prometheus-client = "0.24"
 
 [dev-dependencies]
+compio = { version = "0.18", features = ["macros"] }
 narwhal-test-util = { path = "../test-util" }
