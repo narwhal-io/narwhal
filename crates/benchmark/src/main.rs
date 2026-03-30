@@ -17,7 +17,6 @@ use narwhal_protocol::Nid;
 use narwhal_protocol::{AclAction, AclType, QoS};
 use narwhal_util::pool::Pool;
 use narwhal_util::string_atom::StringAtom;
-use rand::prelude::*;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use tracing::{error, info, warn};
@@ -48,9 +47,9 @@ struct Cli {
   #[arg(short, long, default_value = "30s", value_parser = parse_duration)]
   duration: Duration,
 
-  /// Maximum size of message payload in bytes
+  /// Size of message payload in bytes
   #[arg(long, default_value = "16384")]
-  max_payload_size: usize,
+  payload_size: usize,
 }
 
 /// Parse duration from string (supports: 30s, 5m, 1h)
@@ -338,7 +337,7 @@ async fn broadcast_messages(
   clients: &[C2sClient],
   channels: &[StringAtom],
   duration: Duration,
-  max_payload_size: usize,
+  payload_size: usize,
 ) -> (u64, hdrhistogram::Histogram<u64>) {
   info!("broadcasting messages across channels for {:?}...", duration);
 
@@ -355,7 +354,7 @@ async fn broadcast_messages(
     let max_inflight_requests =
       client.session_info().await.ok().map(|(info, _)| info.max_inflight_requests).unwrap_or(1);
 
-    let client_pool = Pool::new(max_inflight_requests as usize, max_payload_size);
+    let client_pool = Pool::new(max_inflight_requests as usize, payload_size);
     let client_hist = arc_histogram.clone();
 
     let task = compio::runtime::spawn(async move {
@@ -370,7 +369,7 @@ async fn broadcast_messages(
         let task_client = client.clone();
         let task_payload_pool = client_pool.clone();
 
-        task_set.push(broadcast_message(task_channel, task_client, task_payload_pool, max_payload_size));
+        task_set.push(broadcast_message(task_channel, task_client, task_payload_pool, payload_size));
 
         channel_idx += 1;
       }
@@ -398,7 +397,7 @@ async fn broadcast_messages(
 
           channel_idx += 1;
 
-          task_set.push(broadcast_message(task_channel, task_client, task_payload_pool, max_payload_size));
+          task_set.push(broadcast_message(task_channel, task_client, task_payload_pool, payload_size));
         }
       }
 
@@ -426,11 +425,10 @@ async fn broadcast_message(
   channel: StringAtom,
   client: C2sClient,
   payload_pool: Pool,
-  max_payload_size: usize,
+  payload_size: usize,
 ) -> anyhow::Result<u64> {
   let mut payload_buffer = payload_pool.acquire_buffer().await;
-  let random_size = rand::rng().random_range(1..=max_payload_size);
-  let payload = payload_buffer.freeze(random_size);
+  let payload = payload_buffer.freeze(payload_size);
 
   let start = Instant::now();
 
@@ -455,7 +453,7 @@ async fn run_benchmark(cli: Cli) -> Result<BenchmarkMetrics> {
   );
 
   // Print additional information
-  info!("max payload size: {} bytes", cli.max_payload_size);
+  info!("payload size: {} bytes", cli.payload_size);
 
   let start_time = Instant::now();
 
@@ -532,7 +530,7 @@ async fn perform_benchmark(cli: &Cli, metrics: &mut BenchmarkMetrics) -> Result<
 
   // Only producers broadcast messages (round-robin across all channels)
   let (messages_sent, latency_histogram) =
-    broadcast_messages(&producer_clients, &channels, cli.duration, cli.max_payload_size).await;
+    broadcast_messages(&producer_clients, &channels, cli.duration, cli.payload_size).await;
   metrics.total_messages_sent = messages_sent;
   metrics.latency_histogram = Some(latency_histogram);
 

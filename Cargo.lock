@@ -1120,7 +1120,6 @@ dependencies = [
  "narwhal-client",
  "narwhal-protocol",
  "narwhal-util",
- "rand",
  "rustls",
  "rustls-pki-types",
  "serde",
