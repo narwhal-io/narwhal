@@ -47,7 +47,7 @@ async fn bootstrap_s2m(
 
 /// Verifies that a channel persisted to disk via `FileChannelStore` survives a server restart.
 #[compio::test]
-async fn test_file_channel_store_persists_and_restores_channel() -> anyhow::Result<()> {
+async fn test_c2s_file_channel_store_persists_and_restores_channel() -> anyhow::Result<()> {
   let tmp = tempfile::tempdir()?;
   let data_dir = tmp.path().to_path_buf();
 
@@ -112,7 +112,7 @@ async fn test_file_channel_store_persists_and_restores_channel() -> anyhow::Resu
 /// Verifies that deleting a persistent channel removes it from disk,
 /// so it is not restored on the next boot.
 #[compio::test]
-async fn test_file_channel_store_deleted_channel_not_restored() -> anyhow::Result<()> {
+async fn test_c2s_file_channel_store_deleted_channel_not_restored() -> anyhow::Result<()> {
   let tmp = tempfile::tempdir()?;
   let data_dir = tmp.path().to_path_buf();
 
