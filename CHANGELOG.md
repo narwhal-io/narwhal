@@ -9,6 +9,7 @@ All notable changes to Narwhal will be documented in this file.
 * [ENHANCEMENT]: Abstract runtime behind `Runtime` trait for future multi-runtime support. [#210](https://github.com/narwhal-io/narwhal/pull/210)
 * [ENHANCEMENT]: Add Prometheus metrics support. [#175](https://github.com/narwhal-io/narwhal/pull/175)
 * [ENHANCEMENT]: Extract thread and runtime management into a shared `CoreDispatcher`. [#172](https://github.com/narwhal-io/narwhal/pull/172)
+* [ENHANCEMENT]: Allow `/` character in channel handler names for hierarchical naming. [#220](https://github.com/narwhal-io/narwhal/pull/220)
 
 ## 0.5.0 (2026-03-02)
 
