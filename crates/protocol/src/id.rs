@@ -119,7 +119,7 @@ impl ChannelId {
     if handler.is_empty() || handler.len() > CHANNEL_HANDLER_MAX_LENGTH {
       return false;
     }
-    if !handler.chars().all(|c| c.is_alphanumeric() || c == '/') {
+    if !handler.chars().all(|c| c.is_ascii_alphanumeric() || c == '/') {
       return false;
     }
 
