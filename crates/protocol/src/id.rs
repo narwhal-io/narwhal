@@ -119,7 +119,7 @@ impl ChannelId {
     if handler.is_empty() || handler.len() > CHANNEL_HANDLER_MAX_LENGTH {
       return false;
     }
-    if !handler.chars().all(|c| c.is_alphanumeric()) {
+    if !handler.chars().all(|c| c.is_alphanumeric() || c == '/') {
       return false;
     }
 
@@ -348,6 +348,12 @@ mod tests {
     assert_eq!(channel_id.handler.as_ref(), "test");
     assert_eq!(channel_id.domain.as_ref(), "localhost");
     assert_eq!(channel_id.to_string(), "!test@localhost");
+
+    // Test with slash in handler
+    let channel_id = ChannelId::from_str("!sports/football@example.com").unwrap();
+    assert_eq!(channel_id.handler.as_ref(), "sports/football");
+    assert_eq!(channel_id.domain.as_ref(), "example.com");
+    assert_eq!(channel_id.to_string(), "!sports/football@example.com");
   }
 
   #[test]
