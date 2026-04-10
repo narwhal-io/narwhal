@@ -126,6 +126,16 @@ impl ChannelManagerMetrics {
       message_log_flush_duration_seconds,
     }
   }
+
+  /// Records the outcome of a message log flush: observes duration and increments the
+  /// success/failure counter.
+  fn record_flush(&self, start: Instant, result: &anyhow::Result<()>) {
+    self.message_log_flush_duration_seconds.observe(start.elapsed().as_secs_f64());
+    match result {
+      Ok(()) => self.message_log_flushes.get_or_create(&SUCCESS).inc(),
+      Err(_) => self.message_log_flushes.get_or_create(&FAILURE).inc(),
+    };
+  }
 }
 
 enum Command {
@@ -385,16 +395,10 @@ impl<ML: MessageLog> Channel<ML> {
           _ = cancel_rx.recv().fuse() => break,
         }
         let start = Instant::now();
-        match message_log.flush().await {
-          Ok(()) => {
-            metrics.message_log_flush_duration_seconds.observe(start.elapsed().as_secs_f64());
-            metrics.message_log_flushes.get_or_create(&SUCCESS).inc();
-          },
-          Err(e) => {
-            metrics.message_log_flush_duration_seconds.observe(start.elapsed().as_secs_f64());
-            metrics.message_log_flushes.get_or_create(&FAILURE).inc();
-            warn!(channel = %handler, error = %e, "periodic message log flush failed");
-          },
+        let result = message_log.flush().await;
+        metrics.record_flush(start, &result);
+        if let Err(e) = result {
+          warn!(channel = %handler, error = %e, "periodic message log flush failed");
         }
       }
     });
@@ -450,16 +454,10 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
       channel.cancel_flush_task();
       if channel.config.persist == Some(true) {
         let start = Instant::now();
-        match channel.message_log.flush().await {
-          Ok(()) => {
-            self.metrics.message_log_flush_duration_seconds.observe(start.elapsed().as_secs_f64());
-            self.metrics.message_log_flushes.get_or_create(&SUCCESS).inc();
-          },
-          Err(e) => {
-            self.metrics.message_log_flush_duration_seconds.observe(start.elapsed().as_secs_f64());
-            self.metrics.message_log_flushes.get_or_create(&FAILURE).inc();
-            warn!(channel = %handler, error = %e, "final flush on shutdown failed");
-          },
+        let result = channel.message_log.flush().await;
+        self.metrics.record_flush(start, &result);
+        if let Err(e) = result {
+          warn!(channel = %handler, error = %e, "final flush on shutdown failed");
         }
       }
     }
@@ -863,16 +861,10 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
       channel.cancel_flush_task();
       if is_persistent {
         let start = Instant::now();
-        match channel.message_log.flush().await {
-          Ok(()) => {
-            self.metrics.message_log_flush_duration_seconds.observe(start.elapsed().as_secs_f64());
-            self.metrics.message_log_flushes.get_or_create(&SUCCESS).inc();
-          },
-          Err(e) => {
-            self.metrics.message_log_flush_duration_seconds.observe(start.elapsed().as_secs_f64());
-            self.metrics.message_log_flushes.get_or_create(&FAILURE).inc();
-            warn!(channel = %channel_id.handler, error = %e, "final flush on delete failed");
-          },
+        let result = channel.message_log.flush().await;
+        self.metrics.record_flush(start, &result);
+        if let Err(e) = result {
+          warn!(channel = %channel_id.handler, error = %e, "final flush on delete failed");
         }
       }
     }
@@ -956,15 +948,7 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
       if flush_interval == 0 {
         let start = Instant::now();
         let result = channel.message_log.flush().await;
-        self.metrics.message_log_flush_duration_seconds.observe(start.elapsed().as_secs_f64());
-        match &result {
-          Ok(()) => {
-            self.metrics.message_log_flushes.get_or_create(&SUCCESS).inc();
-          },
-          Err(_) => {
-            self.metrics.message_log_flushes.get_or_create(&FAILURE).inc();
-          },
-        }
+        self.metrics.record_flush(start, &result);
         result?;
       } else {
         channel.ensure_flush_task(flush_interval, &self.metrics);
@@ -1231,16 +1215,10 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
       // indefinitely waiting for the next broadcast.
       if flush_interval_changed && is_persistent {
         let start = Instant::now();
-        match channel.message_log.flush().await {
-          Ok(()) => {
-            self.metrics.message_log_flush_duration_seconds.observe(start.elapsed().as_secs_f64());
-            self.metrics.message_log_flushes.get_or_create(&SUCCESS).inc();
-          },
-          Err(e) => {
-            self.metrics.message_log_flush_duration_seconds.observe(start.elapsed().as_secs_f64());
-            self.metrics.message_log_flushes.get_or_create(&FAILURE).inc();
-            warn!(channel = %channel_id.handler, error = %e, "flush on interval change failed");
-          },
+        let result = channel.message_log.flush().await;
+        self.metrics.record_flush(start, &result);
+        if let Err(e) = result {
+          warn!(channel = %channel_id.handler, error = %e, "flush on interval change failed");
         }
         if let Some(interval) = channel.config.message_flush_interval
           && interval > 0
@@ -1516,16 +1494,10 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
       channel.cancel_flush_task();
       if is_persistent {
         let start = Instant::now();
-        match channel.message_log.flush().await {
-          Ok(()) => {
-            self.metrics.message_log_flush_duration_seconds.observe(start.elapsed().as_secs_f64());
-            self.metrics.message_log_flushes.get_or_create(&SUCCESS).inc();
-          },
-          Err(e) => {
-            self.metrics.message_log_flush_duration_seconds.observe(start.elapsed().as_secs_f64());
-            self.metrics.message_log_flushes.get_or_create(&FAILURE).inc();
-            warn!(channel = %handler, error = %e, "final flush on empty channel failed");
-          },
+        let result = channel.message_log.flush().await;
+        self.metrics.record_flush(start, &result);
+        if let Err(e) = result {
+          warn!(channel = %handler, error = %e, "final flush on empty channel failed");
         }
         self.delete_persistent_storage(handler).await;
       }
