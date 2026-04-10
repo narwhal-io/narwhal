@@ -1213,11 +1213,12 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
     nid: Nid,
     history_id: StringAtom,
     _from_seq: u64,
-    _limit: u32,
+    limit: u32,
     _direction: Option<StringAtom>,
     transmitter: Arc<dyn Transmitter>,
     correlation_id: u32,
   ) -> anyhow::Result<()> {
+    let _limit = limit.min(self.limits.max_history_limit);
     if channel_id.domain != self.local_domain {
       return Err(narwhal_protocol::Error::new(NotImplemented).with_id(correlation_id).into());
     }
@@ -1408,6 +1409,7 @@ pub struct ChannelManagerLimits {
   pub max_payload_size: u32,
   pub max_persist_messages: u32,
   pub max_message_flush_interval: u32,
+  pub max_history_limit: u32,
 }
 
 /// The channel manager.
