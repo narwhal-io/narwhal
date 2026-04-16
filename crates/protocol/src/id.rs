@@ -9,10 +9,10 @@ use regex::Regex;
 use narwhal_util::string_atom::StringAtom;
 
 /// The maximum length of a username.
-const USERNAME_MAX_LENGTH: usize = 256;
+pub const USERNAME_MAX_LENGTH: usize = 256;
 
 /// The maximum length of a channel handler.
-const CHANNEL_HANDLER_MAX_LENGTH: usize = 256;
+pub const CHANNEL_HANDLER_MAX_LENGTH: usize = 256;
 
 const LOCALHOST_DOMAIN: &str = "localhost";
 
@@ -29,7 +29,10 @@ static DOMAIN_REGEX: Lazy<Regex> = Lazy::new(|| {
   ).unwrap()
 });
 
-const DOMAIN_MAX_LENGTH: usize = 253;
+pub const DOMAIN_MAX_LENGTH: usize = 253;
+
+/// The maximum length of a NID (`username@domain`).
+pub const NID_MAX_LENGTH: usize = USERNAME_MAX_LENGTH + 1 + DOMAIN_MAX_LENGTH;
 
 /// Validates a domain.
 fn validate_domain(domain: &str) -> bool {

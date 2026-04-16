@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_channel::{Receiver, Sender};
+use async_trait::async_trait;
 
 use narwhal_common::core_dispatcher::CoreDispatcher;
 use narwhal_protocol::ErrorReason::{
@@ -22,7 +23,7 @@ use narwhal_protocol::{
 };
 use narwhal_protocol::{ChannelId, Nid};
 use narwhal_protocol::{Event, EventKind};
-use narwhal_util::pool::PoolBuffer;
+use narwhal_util::pool::{Pool, PoolBuffer};
 use narwhal_util::string_atom::StringAtom;
 
 use prometheus_client::encoding::EncodeLabelSet;
@@ -39,7 +40,7 @@ use crate::router::GlobalRouter;
 use crate::transmitter::{Resource, Transmitter};
 
 use super::membership::Membership;
-use super::store::{ChannelStore, MessageLog, MessageLogFactory, PersistedChannel};
+use super::store::{ChannelStore, LogEntry, LogVisitor, MessageLog, MessageLogFactory, PersistedChannel};
 
 const DEFAULT_MAILBOX_CAPACITY: usize = 16384;
 
@@ -438,6 +439,8 @@ struct ChannelShard<CS: ChannelStore, MLF: MessageLogFactory> {
   limits: ChannelManagerLimits,
   metrics: ChannelManagerMetrics,
   auth_enabled: bool,
+  /// Dedicated pool for history replay payload buffers.
+  history_pool: Pool,
 }
 
 // === impl ChannelShard ===
@@ -474,20 +477,14 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
       };
 
       let handler = persisted.handler.clone();
-      let message_log = self.message_log_factory.create(&handler);
+      let message_log = self.message_log_factory.create(&handler).await;
 
       let mut channel = Channel::new(handler.clone(), persisted.config, self.notifier.clone(), message_log);
       channel.owner = persisted.owner;
       channel.acl = persisted.acl;
       channel.members = persisted.members;
       channel.store_hash = Some(hash.clone());
-      channel.seq = match channel.message_log.last_seq().await {
-        Ok(seq) => seq + 1,
-        Err(e) => {
-          warn!(channel = %handler, error = %e, "skipping channel restore: failed to read last seq from message log");
-          continue;
-        },
-      };
+      channel.seq = channel.message_log.last_seq() + 1;
       channel.update_allowed_targets();
 
       // Use u32::MAX to bypass the per-client limit: persisted membership is authoritative
@@ -560,7 +557,8 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
         correlation_id,
         reply_tx,
       } => {
-        let result = self.history(channel_id, nid, history_id, from_seq, limit, direction, transmitter, correlation_id);
+        let result =
+          self.history(channel_id, nid, history_id, from_seq, limit, direction, transmitter, correlation_id).await;
         let _ = reply_tx.send(result).await;
       },
       Command::ChannelSeq { channel_id, nid, transmitter, correlation_id, reply_tx } => {
@@ -604,7 +602,7 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
         persist: Some(false),
         message_flush_interval: Some(0),
       };
-      let message_log = self.message_log_factory.create(&handler);
+      let message_log = self.message_log_factory.create(&handler).await;
       self.channels.insert(handler.clone(), Channel::new(handler.clone(), config, self.notifier.clone(), message_log));
       self.total_channels.fetch_add(1, Ordering::SeqCst);
     }
@@ -1305,18 +1303,18 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
   }
 
   #[allow(clippy::too_many_arguments)]
-  fn history(
-    &self,
+  async fn history(
+    &mut self,
     channel_id: ChannelId,
     nid: Nid,
     history_id: StringAtom,
-    _from_seq: u64,
+    from_seq: u64,
     limit: u32,
     _direction: Option<StringAtom>,
     transmitter: Arc<dyn Transmitter>,
     correlation_id: u32,
   ) -> anyhow::Result<()> {
-    let _limit = limit.min(self.limits.max_history_limit);
+    let limit = limit.min(self.limits.max_history_limit);
     if channel_id.domain != self.local_domain {
       return Err(narwhal_protocol::Error::new(NotImplemented).with_id(correlation_id).into());
     }
@@ -1337,13 +1335,21 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
       return Err(narwhal_protocol::Error::new(PersistenceNotEnabled).with_id(correlation_id).into());
     }
 
-    // TODO: implement actual message log retrieval once the message log supports indexed reads.
-    // For now, return an empty history result.
+    let channel_atom: StringAtom = (&channel_id).into();
+    let mut visitor = HistoryVisitor {
+      transmitter: &transmitter,
+      channel: &channel_atom,
+      history_id: &history_id,
+      pool: &self.history_pool,
+    };
+
+    let count = channel.message_log.read(from_seq, limit, &mut visitor).await?;
+
     transmitter.send_message(Message::HistoryAck(HistoryAckParameters {
       id: correlation_id,
       history_id,
-      channel: channel_id.into(),
-      count: 0,
+      channel: channel_atom,
+      count,
     }));
 
     Ok(())
@@ -1376,13 +1382,11 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
       return Err(narwhal_protocol::Error::new(PersistenceNotEnabled).with_id(correlation_id).into());
     }
 
-    // TODO: implement actual first_seq/last_seq retrieval once the message log supports indexed reads.
-    // For now, return zeros (empty log).
     transmitter.send_message(Message::ChannelSeqAck(ChannelSeqAckParameters {
       id: correlation_id,
       channel: channel_id.into(),
-      first_seq: 0,
-      last_seq: 0,
+      first_seq: channel.message_log.first_seq(),
+      last_seq: channel.message_log.last_seq(),
     }));
 
     Ok(())
@@ -1640,6 +1644,10 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelManager<CS, MLF> {
       let limits = self.limits.clone();
       let metrics = self.metrics.clone();
 
+      // 2× max_history_limit: one replay's worth of buffers can still be draining
+      // through the outbound queue when the next replay starts.
+      let history_pool = Pool::new(limits.max_history_limit as usize * 2, limits.max_payload_size as usize);
+
       core_dispatcher
         .dispatch_at_shard(shard_id, move || async move {
           let shard = ChannelShard {
@@ -1655,6 +1663,7 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelManager<CS, MLF> {
             limits,
             metrics,
             auth_enabled: restore_channels,
+            history_pool,
           };
           shard.restore_and_run(hashes_for_shard).await;
         })
@@ -2153,6 +2162,35 @@ impl ChannelAcl {
       AclType::Publish => self.publish_acl.update(nids, action),
       AclType::Read => self.read_acl.update(nids, action),
     }
+  }
+}
+
+/// Visitor that streams log entries to a client as MESSAGE frames with a `history_id`.
+struct HistoryVisitor<'a> {
+  transmitter: &'a Arc<dyn Transmitter>,
+  channel: &'a StringAtom,
+  history_id: &'a StringAtom,
+  pool: &'a Pool,
+}
+
+#[async_trait(?Send)]
+impl LogVisitor for HistoryVisitor<'_> {
+  async fn visit(&mut self, entry: LogEntry<'_>) -> anyhow::Result<()> {
+    let msg = Message::Message(MessageParameters {
+      from: StringAtom::from(std::str::from_utf8(entry.from)?),
+      channel: self.channel.clone(),
+      length: entry.payload.len() as u32,
+      seq: entry.seq,
+      timestamp: entry.timestamp,
+      history_id: Some(self.history_id.clone()),
+    });
+
+    let mut buf = self.pool.acquire_buffer().await;
+    buf.as_mut_slice()[..entry.payload.len()].copy_from_slice(entry.payload);
+    let payload = buf.freeze(entry.payload.len());
+    self.transmitter.send_message_with_payload(msg, Some(payload));
+
+    Ok(())
   }
 }
 

@@ -12,10 +12,12 @@ pub mod version;
 
 use std::env;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::channel::file_store::FileChannelStore;
-use crate::channel::{ChannelManager, NoopMessageLogFactory};
+use crate::channel::file_message_log::FileMessageLogFactory;
+use crate::channel::ChannelManager;
 use crate::notifier::Notifier;
 use crate::router::GlobalRouter;
 use crate::telemetry::MetricsRegistry;
@@ -115,14 +117,16 @@ async fn run_server(
 
   let channel_reg = guard.sub_registry_with_prefix("narwhal");
 
-  let channel_store = FileChannelStore::new(c2s_config.storage.data_dir.clone().into()).await?;
+  let data_dir: PathBuf = c2s_config.storage.data_dir.clone().into();
+  let channel_store = FileChannelStore::new(data_dir.clone()).await?;
+  let message_log_factory = FileMessageLogFactory::new(data_dir, c2s_config.limits.max_payload_size);
 
   let mut channel_mng = ChannelManager::new(
     global_router.clone(),
     notifier.clone(),
     channel_limits,
     channel_store,
-    NoopMessageLogFactory,
+    message_log_factory,
     channel_reg,
   );
   let auth_enabled = match &modulator_service.modulator {

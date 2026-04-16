@@ -4,7 +4,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use narwhal_common::runtime::AsyncWrite;
 use narwhal_protocol::{Message, Nid};
 use narwhal_util::pool::PoolBuffer;
 use narwhal_util::string_atom::StringAtom;
@@ -57,12 +56,31 @@ pub trait ChannelStore: Clone + Send + Sync + 'static {
 }
 
 /// Factory for creating per-channel message logs.
+#[async_trait(?Send)]
 pub trait MessageLogFactory: Clone + Send + Sync + 'static {
   /// The message log type produced by this factory.
   type Log: MessageLog;
 
   /// Creates a message log for the given channel handler.
-  fn create(&self, handler: &StringAtom) -> Self::Log;
+  async fn create(&self, handler: &StringAtom) -> Self::Log;
+}
+
+/// A single entry read from the message log.
+pub struct LogEntry<'a> {
+  pub seq: u64,
+  pub timestamp: u64,
+  pub from: &'a [u8],
+  pub payload: &'a [u8],
+}
+
+/// Visitor callback for processing log entries during a read.
+///
+/// Called for each entry, borrowing data directly from the log's internal read
+/// buffer. Implementations must not hold references to the entry data after
+/// `visit` returns.
+#[async_trait(?Send)]
+pub trait LogVisitor {
+  async fn visit(&mut self, entry: LogEntry<'_>) -> anyhow::Result<()>;
 }
 
 /// Append-only log for persisting broadcast messages for a single channel.
@@ -79,14 +97,19 @@ pub trait MessageLog: 'static {
   /// Flushes any buffered writes to durable storage.
   async fn flush(&self) -> anyhow::Result<()>;
 
+  /// Returns the first retained sequence number, or 0 if the log is empty.
+  fn first_seq(&self) -> u64;
+
   /// Returns the highest sequence number stored in the log, or 0 if the log is empty.
   /// Used during restore to derive the correct starting seq for new broadcasts.
-  async fn last_seq(&self) -> anyhow::Result<u64>;
+  fn last_seq(&self) -> u64;
 
-  /// Streams messages with seq > `from_seq`, ordered by seq ascending, up to `limit` entries,
-  /// writing their wire-format representation directly to the given writer.
-  /// Returns the number of messages written.
-  async fn write_history<W: AsyncWrite>(&self, from_seq: u64, limit: u32, writer: &mut W) -> anyhow::Result<u32>
+  /// Reads entries starting at `from_seq`, up to `limit` entries, calling
+  /// `visitor.visit()` for each entry. Returns the number of entries visited.
+  ///
+  /// Async because file reads use io_uring (compio). The visitor callback is
+  /// sync — data is in the read buffer when called.
+  async fn read(&self, from_seq: u64, limit: u32, visitor: &mut impl LogVisitor) -> anyhow::Result<u32>
   where
     Self: Sized;
 }
@@ -110,11 +133,15 @@ impl MessageLog for NoopMessageLog {
     Ok(())
   }
 
-  async fn last_seq(&self) -> anyhow::Result<u64> {
-    Ok(0)
+  fn first_seq(&self) -> u64 {
+    0
   }
 
-  async fn write_history<W: AsyncWrite>(&self, _from_seq: u64, _limit: u32, _writer: &mut W) -> anyhow::Result<u32>
+  fn last_seq(&self) -> u64 {
+    0
+  }
+
+  async fn read(&self, _from_seq: u64, _limit: u32, _visitor: &mut impl LogVisitor) -> anyhow::Result<u32>
   where
     Self: Sized,
   {
@@ -128,10 +155,11 @@ pub struct NoopMessageLogFactory;
 
 // === impl NoopMessageLogFactory ===
 
+#[async_trait(?Send)]
 impl MessageLogFactory for NoopMessageLogFactory {
   type Log = NoopMessageLog;
 
-  fn create(&self, _handler: &StringAtom) -> NoopMessageLog {
+  async fn create(&self, _handler: &StringAtom) -> NoopMessageLog {
     NoopMessageLog
   }
 }
