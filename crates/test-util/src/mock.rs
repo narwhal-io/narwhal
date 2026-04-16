@@ -6,9 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use narwhal_common::runtime::AsyncWrite;
 use narwhal_protocol::{Message, Nid};
-use narwhal_server::channel::store::{ChannelStore, MessageLog, MessageLogFactory, PersistedChannel};
+use narwhal_server::channel::store::{ChannelStore, LogVisitor, MessageLog, MessageLogFactory, PersistedChannel};
 use narwhal_server::channel::{ChannelAcl, ChannelConfig};
 use narwhal_util::pool::PoolBuffer;
 use narwhal_util::string_atom::StringAtom;
@@ -74,11 +73,15 @@ impl MessageLog for FailingMessageLog {
     Ok(())
   }
 
-  async fn last_seq(&self) -> anyhow::Result<u64> {
-    Ok(0)
+  fn first_seq(&self) -> u64 {
+    0
   }
 
-  async fn write_history<W: AsyncWrite>(&self, _from_seq: u64, _limit: u32, _writer: &mut W) -> anyhow::Result<u32>
+  fn last_seq(&self) -> u64 {
+    0
+  }
+
+  async fn read(&self, _from_seq: u64, _limit: u32, _visitor: &mut impl LogVisitor) -> anyhow::Result<u32>
   where
     Self: Sized,
   {
@@ -103,10 +106,11 @@ impl FailingMessageLogFactory {
   }
 }
 
+#[async_trait(?Send)]
 impl MessageLogFactory for FailingMessageLogFactory {
   type Log = FailingMessageLog;
 
-  fn create(&self, _handler: &StringAtom) -> FailingMessageLog {
+  async fn create(&self, _handler: &StringAtom) -> FailingMessageLog {
     FailingMessageLog { should_fail: self.should_fail.clone() }
   }
 }
