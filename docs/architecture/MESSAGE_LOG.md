@@ -57,11 +57,11 @@ with companion sparse index files, stored in the channel's existing directory.
                          │
                          ▼
 ┌──────────────────────────────────────────────────────────┐
-│                  ChannelShard                             │
+│                  ChannelShard                            │
 │                                                          │
 │   ┌─────────────┐    ┌──────────────┐                    │
-│   │   Channel    │───►│  MessageLog   │                   │
-│   │  (in-memory) │    │  (segments)   │                   │
+│   │   Channel    │───►│  MessageLog   │                  │
+│   │  (in-memory) │    │  (segments)   │                  │
 │   └─────────────┘    └──────┬───────┘                    │
 │                             │                            │
 │              ┌──────────────┼──────────────┐             │
@@ -122,10 +122,10 @@ segment exceeds the size threshold.
 Each entry is a self-contained binary record:
 
 ```
-┌─────────┬───────────┬──────────┬─────────────┬──────┬─────────┬───────┐
-│ seq     │ timestamp │ from_len │ payload_len │ from │ payload │ crc32 │
+┌─────────┬───────────┬──────────┬─────────────┬──────┬─────────┬────────┐
+│ seq     │ timestamp │ from_len │ payload_len │ from │ payload │ crc32  │
 │ 8 bytes │ 8 bytes   │ 2 bytes  │ 4 bytes     │ var  │ var     │ 4 bytes│
-└─────────┴───────────┴──────────┴─────────────┴──────┴─────────┴───────┘
+└─────────┴───────────┴──────────┴─────────────┴──────┴─────────┴────────┘
 ```
 
 | Field         | Type   | Description |
@@ -159,10 +159,10 @@ memory-mapped files (`mmap`) for efficient access.
 **Index entry format:**
 
 ```
-┌────────────────┬────────┐
-│ relative_seq   │ offset │
+┌────────────────┬───────────────┐
+│ relative_seq   │ offset        │
 │ 4 bytes (u32)  │ 8 bytes (u64) │
-└────────────────┴────────┘
+└────────────────┴───────────────┘
 ```
 
 | Field          | Type  | Description |
@@ -317,12 +317,12 @@ to the transmitter, channel name, `history_id`, and the payload pool:
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│                    HistoryVisitor                           │
+│                    HistoryVisitor                          │
 │                                                            │
 │  For each LogEntry:                                        │
 │    1. Construct Message::Message { history_id, ... }       │
 │    2. Copy payload into PoolBuffer (no heap alloc)         │
-│    3. Call transmitter.send_message_with_payload()          │
+│    3. Call transmitter.send_message_with_payload()         │
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -456,12 +456,12 @@ struct EntryReader {
 │  2. read_exact_at(body[..body_size], pos + 22)               │
 │     Uses IoBuf::slice(..body_size) to read exactly           │
 │     from_len + payload_len + 4 bytes into the pre-allocated  │
-│     body buffer without touching remaining capacity           │
+│     body buffer without touching remaining capacity          │
 │                                                              │
 │  3. Verify CRC32 over header + body                          │
 │                                                              │
 │  4. If seq >= from_seq:                                      │
-│     visitor.visit(LogEntry { seq, from, payload }).await      │
+│     visitor.visit(LogEntry { seq, from, payload }).await     │
 │     (from and payload borrow directly from body buffer)      │
 │                                                              │
 │  5. Advance pos += entry_size                                │
@@ -561,15 +561,15 @@ Client                        Server (ChannelShard)
   │                               │     │
   │                               │     ├─ For each entry:
   │  MESSAGE from=... channel=... │     │   visitor constructs MESSAGE with history_id=h1,
-  │  history_id=h1 seq=50 ...    │◄────│   copies payload to PoolBuffer,
+  │  history_id=h1 seq=50 ...     │◄────│   copies payload to PoolBuffer,
   │  <payload>                    │     │   calls transmitter.send_message_with_payload()
   │                               │     │
-  │  MESSAGE ... seq=51 ...      │◄────│
+  │  MESSAGE ... seq=51 ...       │◄────│
   │  ...                          │     │
   │                               │     └─ Returns count
   │                               │
-  │  HISTORY_ACK id=1 channel=!ch│
-  │  history_id=h1 count=10      │◄──── Send HISTORY_ACK with count
+  │  HISTORY_ACK id=1 channel=!ch │
+  │  history_id=h1 count=10       │◄──── Send HISTORY_ACK with count
   │                               │
 ```
 
@@ -585,7 +585,7 @@ Client                        Server (ChannelShard)
   │                               │
   │  CHAN_SEQ_ACK id=1            │
   │  channel=!ch                  │◄──── first_seq = message_log.first_seq()
-  │  first_seq=1 last_seq=500    │      last_seq  = message_log.last_seq()
+  │  first_seq=1 last_seq=500     │      last_seq  = message_log.last_seq()
   │                               │
 ```
 
