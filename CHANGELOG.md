@@ -2,6 +2,8 @@
 
 All notable changes to Narwhal will be documented in this file.
 
+## Unreleased
+
 ## 0.6.0 (2026-04-20)
 
 * [CHANGE]: Migrate async runtime from monoio to compio (io_uring). [#212](https://github.com/lonewolf-io/narwhal/pull/212)
@@ -15,7 +17,7 @@ All notable changes to Narwhal will be documented in this file.
 
 * [CHANGE]: Migrate primary async runtime from tokio to monoio (io_uring). [#150](https://github.com/lonewolf-io/narwhal/pull/150), [#165](https://github.com/lonewolf-io/narwhal/pull/165)
 * [CHANGE]: Add `seq` and `timestamp` fields to `MESSAGE` and `BROADCAST_ACK`. Each delivered message now carries a per-channel monotonic sequence number and a server-assigned UTC millisecond timestamp. [#166](https://github.com/lonewolf-io/narwhal/pull/166)
-* [ENHANCEMENT]: Add `DELETE` command for channel deletion. [#160](https://github.com/lonewolf-io/narwhal/pull/160),[#161](https://github.com/lonewolf-io/narwhal/pull/161)
+* [ENHANCEMENT]: Add `DELETE` command for channel deletion. [#160](https://github.com/lonewolf-io/narwhal/pull/160), [#161](https://github.com/lonewolf-io/narwhal/pull/161)
 
 ## 0.4.0 (2026-01-27)
 
