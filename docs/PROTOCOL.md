@@ -1641,8 +1641,8 @@ Messages that expect responses use an `id` parameter for correlation:
   - Added `HISTORY` / `HISTORY_ACK` messages for retrieving archived messages; replayed frames are delivered as regular `MESSAGE` frames carrying a new optional `history_id`
   - Added optional `history_id` to `MESSAGE` to tag frames delivered during a `HISTORY` replay
   - Added error reasons `PERSISTENCE_NOT_ENABLED` (recoverable) and `RESOURCE_LIMIT_REACHED` (recoverable)
-  - Renamed error reason `MESSAGE_CHANNEL_FULL` to `OUTBOUND_QUEUE_FULL` to match the underlying per-connection outbound queue it refers to
-  - Removed error reason `RESOURCE_CONFLICT` (never emitted by the server)
+  - Corrected the documentation to refer to error reason `OUTBOUND_QUEUE_FULL`, matching the underlying per-connection outbound queue it refers to (the server has always emitted this name; the legacy alias `SEND_CHANNEL_FULL` remains recognised on the wire)
+  - Removed error reason `RESOURCE_CONFLICT` from the documentation (never emitted by the server)
 - **Version 1.3**:
   - Added `seq` (u64) to `BROADCAST_ACK`: the server echoes back the sequence number assigned to the message so the sender knows its position in the channel log
   - Added `seq` (u64) and `timestamp` (u64) to `MESSAGE`: every delivered message now carries a per-channel monotonic sequence number and a server-assigned UTC millisecond timestamp; both values are identical across all recipients of the same broadcast
