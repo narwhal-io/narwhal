@@ -304,7 +304,6 @@ enum Command {
     history_id: StringAtom,
     from_seq: u64,
     limit: u32,
-    direction: Option<StringAtom>,
     transmitter: Arc<dyn Transmitter>,
     correlation_id: u32,
     reply_tx: Sender<anyhow::Result<()>>,
@@ -627,13 +626,11 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
         history_id,
         from_seq,
         limit,
-        direction,
         transmitter,
         correlation_id,
         reply_tx,
       } => {
-        let result =
-          self.history(channel_id, nid, history_id, from_seq, limit, direction, transmitter, correlation_id).await;
+        let result = self.history(channel_id, nid, history_id, from_seq, limit, transmitter, correlation_id).await;
         let _ = reply_tx.send(result).await;
       },
       Command::ChannelSeq { channel_id, nid, transmitter, correlation_id, reply_tx } => {
@@ -1385,7 +1382,6 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelShard<CS, MLF> {
     history_id: StringAtom,
     from_seq: u64,
     limit: u32,
-    _direction: Option<StringAtom>,
     transmitter: Arc<dyn Transmitter>,
     correlation_id: u32,
   ) -> anyhow::Result<()> {
@@ -2097,7 +2093,6 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelManager<CS, MLF> {
     history_id: StringAtom,
     from_seq: u64,
     limit: u32,
-    direction: Option<StringAtom>,
     transmitter: Arc<dyn Transmitter>,
     correlation_id: u32,
   ) -> anyhow::Result<()> {
@@ -2113,7 +2108,6 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> ChannelManager<CS, MLF> {
         history_id,
         from_seq,
         limit,
-        direction,
         transmitter,
         correlation_id,
         reply_tx,
