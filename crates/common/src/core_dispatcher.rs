@@ -15,6 +15,31 @@ use tracing::{error, info, trace, warn};
 /// This represents a spawned task that can be awaited or detached.
 pub type Task = compio::runtime::JoinHandle<()>;
 
+/// Awaits a spawned task and surfaces panics through the log instead of
+/// dropping them.
+///
+/// `compio::runtime::JoinHandle<T>` yields `Result<T, Box<dyn Any + Send>>`
+/// on await: a panic in the spawned task arrives as `Err`. Call sites that
+/// would otherwise write `let _ = handle.await;` should use this helper so
+/// background-task panics are at least visible at `WARN`. Returns `None` on
+/// panic, `Some(value)` on normal completion.
+pub async fn await_task<T>(handle: compio::runtime::JoinHandle<T>) -> Option<T> {
+  match handle.await {
+    Ok(value) => Some(value),
+    Err(payload) => {
+      let msg: &str = if let Some(s) = payload.downcast_ref::<&'static str>() {
+        s
+      } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.as_str()
+      } else {
+        "<non-string panic payload>"
+      };
+      warn!(panic = msg, "spawned task panicked");
+      None
+    },
+  }
+}
+
 type SpawnFn = Box<dyn FnOnce() + Send + 'static>;
 
 struct WorkerHandle {

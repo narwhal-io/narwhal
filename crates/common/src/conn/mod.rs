@@ -35,7 +35,7 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 
-use crate::core_dispatcher::Task;
+use crate::core_dispatcher::{Task, await_task};
 use crate::service::Service;
 
 const SERVER_OVERLOADED_ERROR: &[u8] = b"ERROR reason=SERVER_OVERLOADED detail=\\\"max connections reached\\\"\n";
@@ -925,7 +925,7 @@ impl<D: Dispatcher> Conn<D> {
     // Wait for all request tasks to complete
     let tasks = std::mem::take(&mut *self.request_tasks.borrow_mut());
     for (_key, task) in tasks {
-      let _ = task.await;
+      await_task(task).await;
     }
 
     // Shutdown the dispatcher.

@@ -13,6 +13,7 @@ use futures::FutureExt;
 use tracing::{error, trace, warn};
 
 use narwhal_common::conn::{ConnTx, State};
+use narwhal_common::core_dispatcher::await_task;
 use narwhal_common::service::{M2sService, S2mService};
 use narwhal_protocol::ErrorReason::{BadRequest, Unauthorized, UnexpectedMessage, UnsupportedProtocolVersion};
 use narwhal_protocol::{Event, Nid, S2mModDirectAckParameters};
@@ -432,7 +433,7 @@ impl<M: Modulator> narwhal_common::conn::DispatcherFactory<S2mDispatcher<M>> for
     inner.shutdown_tx.close();
 
     if let Some(handle) = inner.payload_reader_handle.take() {
-      let _ = handle.await;
+      await_task(handle).await;
     }
 
     if let Some(m2s_client) = inner.m2s_client.take() {
