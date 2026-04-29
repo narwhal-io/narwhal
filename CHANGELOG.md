@@ -4,7 +4,7 @@ All notable changes to Narwhal will be documented in this file.
 
 ## Unreleased
 
-* [ENHANCEMENT]: Surface mid-segment CRC failures in sealed message-log segments via a new `message_log_sealed_segment_truncations` counter and a `tracing::warn!`, so disk corruption past the first entry of a sealed segment shows up as telemetry instead of silent missing history. [#269](https://github.com/lonewolf-io/narwhal/pull/269)
+* [ENHANCEMENT]: Surface sealed message-log segments whose recovery validation scan terminates before EOF (CRC mismatch, unreadable header, oversized declared lengths, truncated tail, or I/O error) via a new `message_log_sealed_segment_truncations` counter and a `tracing::warn!`, so silent data loss past the validated region shows up as telemetry instead of being discovered later via missing history. [#269](https://github.com/lonewolf-io/narwhal/pull/269)
 * [BUGFIX]: Reject `seq=0` and non-monotonic `seq` in `FileMessageLog::append` to prevent caller-contract violations from silently corrupting the log's sentinel-based seq tracking and the sparse index's monotonicity invariant. [#268](https://github.com/lonewolf-io/narwhal/pull/268)
 * [BUGFIX]: Make sealed-index rebuild atomic via write-temp-rename so a mid-rebuild crash never leaves a partial `.idx` on disk. [#263](https://github.com/lonewolf-io/narwhal/pull/263)
 * [BUGFIX]: Tighten the sealed-index last-offset validation to require room for a full entry header, and document the empty-active-segment branch of recovery. [#262](https://github.com/lonewolf-io/narwhal/pull/262)

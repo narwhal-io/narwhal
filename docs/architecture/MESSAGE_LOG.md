@@ -636,15 +636,17 @@ start of recovery and reused across all segments to avoid per-segment allocation
    │   `.idx`'s last entry could be used to bound the scan, but the current
    │   implementation does not exploit this. Segments with zero valid
    │   entries are deleted.
-   │   If `valid_size < file_size` (CRC failed mid-segment, i.e. bit rot
-   │   or other on-disk corruption past the first entry), increment the
+   │   If `valid_size < file_size` (the validation scan terminated before
+   │   EOF — a CRC mismatch, an unreadable header, oversized declared
+   │   lengths, a truncated tail, or an I/O error), increment the
    │   `message_log_sealed_segment_truncations_total` counter and emit a
    │   `tracing::warn!` carrying the path, file size, valid size and last
    │   valid seq. The segment is registered with `file_size = valid_size`
-   │   so subsequent reads stop at the last validated entry; entries past
-   │   the corruption boundary remain on disk but are unreachable. This
+   │   so subsequent reads stop at the last validated entry; bytes past
+   │   the validated region remain on disk but are unreachable. This
    │   surfaces silent data loss to operators rather than letting it be
-   │   discovered later via missing history.
+   │   discovered later via missing history. The `crc_failures` counter
+   │   narrows the root cause to CRC mismatches specifically.
    ├─ .idx looks valid? → memory-map read-only (Mmap)
    └─ .idx missing or visibly corrupt? → rebuild by scanning .log with
    │                   EntryReader, then atomically replace the `.idx`:

@@ -458,12 +458,15 @@ impl Inner {
           let _ = compio::fs::remove_file(&idx_path).await;
           continue;
         }
-        // Mid-segment CRC failure on a sealed segment is silent data loss:
-        // the .log keeps the corrupted bytes and any valid entries past
-        // them, but `last_seq` is pinned to the pre-corruption position
+        // The validation scan terminated before EOF on a sealed segment.
+        // This can mean a CRC mismatch, an unreadable header, oversized
+        // declared lengths, a truncated tail, or an I/O error — any of
+        // which is silent data loss: the .log still holds the trailing
+        // bytes, but `last_seq` is pinned to the last validated position
         // and reads stop there. Surface this to operators via a metric +
         // warn log so disk health can be investigated rather than
-        // discovered later via missing history.
+        // discovered later via missing history. The `crc_failures`
+        // counter narrows the root cause to CRC mismatches specifically.
         if valid_size < file_size {
           self.metrics.sealed_segment_truncations.inc();
           tracing::warn!(
@@ -472,7 +475,7 @@ impl Inner {
             valid_size,
             last_valid_seq = last_seq,
             lost_bytes = file_size - valid_size,
-            "sealed message-log segment failed CRC mid-file; entries past the failure are unreachable"
+            "sealed message-log segment validation scan terminated before EOF; entries past the failure are unreachable"
           );
         }
         if !Self::looks_like_valid_index(&idx_path, valid_size, self.idx_capacity()).await {
@@ -481,7 +484,7 @@ impl Inner {
         let idx_mmap = Self::mmap_index(&idx_path).await;
         // Use `valid_size` rather than the on-disk `file_size` so subsequent
         // reads stop at the last validated entry and never attempt to
-        // decode bytes past the CRC failure boundary.
+        // decode bytes past the validation boundary.
         self.segments.push(SegmentInfo { first_seq: base_seq, last_seq, file_size: valid_size, idx_mmap });
       }
     }
