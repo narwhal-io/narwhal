@@ -4,6 +4,7 @@ All notable changes to Narwhal will be documented in this file.
 
 ## Unreleased
 
+* [BUGFIX]: Reject `seq=0` and non-monotonic `seq` in `FileMessageLog::append` to prevent caller-contract violations from silently corrupting the log's sentinel-based seq tracking and the sparse index's monotonicity invariant. [#268](https://github.com/lonewolf-io/narwhal/pull/268)
 * [BUGFIX]: Make sealed-index rebuild atomic via write-temp-rename so a mid-rebuild crash never leaves a partial `.idx` on disk. [#263](https://github.com/lonewolf-io/narwhal/pull/263)
 * [BUGFIX]: Tighten the sealed-index last-offset validation to require room for a full entry header, and document the empty-active-segment branch of recovery. [#262](https://github.com/lonewolf-io/narwhal/pull/262)
 * [BUGFIX]: Read path no longer falls back to the active segment's index when a sealed segment has no mmap; recovery propagates fatal mmap/open errors so the affected channel refuses to come online instead of silently dropping index updates. [#261](https://github.com/lonewolf-io/narwhal/pull/261)
