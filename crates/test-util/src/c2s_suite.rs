@@ -98,6 +98,8 @@ impl<CS: ChannelStore, MLF: MessageLogFactory> C2sSuite<CS, MLF> {
     channel_store: CS,
     message_log_factory: MLF,
   ) -> anyhow::Result<Self> {
+    crate::raise_fd_limit();
+
     let arc_config = Arc::new(config);
 
     // Bootstrap the core dispatcher first.

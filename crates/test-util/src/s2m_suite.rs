@@ -30,6 +30,8 @@ impl<M: Modulator> S2mSuite<M> {
   ///
   /// This is `async` because `ConnRuntime::new` (conn) is async.
   pub async fn with_config(config: narwhal_modulator::S2mServerConfig, modulator: M) -> Self {
+    crate::raise_fd_limit();
+
     let arc_config = Arc::new(config);
 
     let mut registry = Registry::default();

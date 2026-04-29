@@ -37,6 +37,8 @@ impl M2sSuite {
   ///
   /// This is `async` because `ConnRuntime::new` (conn) is async.
   pub async fn with_config(config: narwhal_modulator::M2sServerConfig) -> Self {
+    crate::raise_fd_limit();
+
     let arc_config = Arc::new(config);
 
     // Create the broadcast channel for outbound payloads

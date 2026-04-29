@@ -1414,6 +1414,7 @@ dependencies = [
  "narwhal-server",
  "narwhal-util",
  "prometheus-client",
+ "rlimit",
  "rustls",
  "rustls-pki-types",
  "webpki-roots",
