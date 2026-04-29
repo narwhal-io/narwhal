@@ -16,11 +16,36 @@ pub use s2m_suite::{S2mSuite, default_s2m_config_with_secret};
 use std::cell::UnsafeCell;
 use std::io::Cursor;
 use std::rc::Rc;
+use std::sync::Once;
 use std::time::Duration;
 
 use anyhow::anyhow;
 use narwhal_protocol::{Message, deserialize, serialize};
 use narwhal_util::pool::MutablePoolBuffer;
+
+/// Raises the soft `RLIMIT_NOFILE` to the current hard limit, once per process.
+///
+/// Integration tests in this workspace each spin up a full server (TLS
+/// listener per worker, file-backed channel store, segmented file message
+/// log). Running the test suite in parallel with the default soft limit of
+/// 1024 fds blows past the cap and surfaces as `Too many open files`
+/// failures. Bumping the soft limit to the hard limit lets the standard
+/// `cargo test` invocation succeed without requiring contributors to set
+/// `ulimit -n` manually.
+///
+/// Idempotent: subsequent calls are no-ops via [`Once`]. Best-effort: if
+/// the syscall fails (e.g. permissions, unsupported platform), tests still
+/// run and either pass or surface the underlying limit explicitly.
+pub fn raise_fd_limit() {
+  static ONCE: Once = Once::new();
+  ONCE.call_once(|| {
+    if let Ok((soft, hard)) = rlimit::getrlimit(rlimit::Resource::NOFILE)
+      && soft < hard
+    {
+      let _ = rlimit::setrlimit(rlimit::Resource::NOFILE, hard, hard);
+    }
+  });
+}
 
 /// A testing macro for asserting that a message matches an expected type and parameters.
 ///
