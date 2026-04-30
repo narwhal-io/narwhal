@@ -1,0 +1,22 @@
+# Configuration for an S2M modulator paired with `c2s-benchmark-with-s2m-unix.toml`.
+# Mirrors `s2m-minimal-unix.toml` but raises the s2m-side message/payload limits to
+# match the c2s-side bench tuning, so the C2S server's `max_message_size` ceiling
+# is not dragged down at session-info negotiation time.
+#
+# NOTE: `[m2s-client]` is intentionally omitted. It is only required when the
+# modulator implements `ReceivePrivatePayload` (i.e. needs the S2M server to push
+# payloads back through an M2S client). The `plain-authenticator` example is
+# auth-only and does not.
+
+# S2M server configuration.
+[server.listener]
+network = "unix"
+socket_path = "/tmp/narwhal-s2m-server.sock"
+
+# Raised limits to keep the s2m session from clamping the C2S `max_message_size`
+# below what the bench config asks for.
+[server.limits]
+# Match the c2s benchmark config (32 KiB).
+max_message_size = 32768
+# Match the c2s benchmark config (128 KiB).
+max_payload_size = 131072

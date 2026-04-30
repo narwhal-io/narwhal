@@ -26,7 +26,6 @@ use prometheus_client::registry::Registry;
 
 const MODULATOR_PROTOCOL_NAME: &str = "plain-authenticator/1.0";
 
-const USERNAME: &str = "user";
 const PASSWORD: &str = "pass";
 
 /// A simple PLAIN authentication modulator.
@@ -34,11 +33,12 @@ const PASSWORD: &str = "pass";
 /// This modulator implements the `Modulator` trait and performs authentication using the PLAIN mechanism.
 /// It expects the authentication token to be a base64-encoded string of the form `\0username\0password`.
 ///
-/// The username and password are checked against hardcoded values for demonstration purposes:
-///   - Username: `user`
+/// Any non-empty username is accepted. The password is checked against a hardcoded value for
+/// demonstration purposes:
 ///   - Password: `pass`
 ///
-/// If the credentials match, authentication succeeds and the username is returned. Otherwise, authentication fails.
+/// If the password matches, authentication succeeds and the client-supplied username is returned.
+/// Otherwise, authentication fails.
 ///
 /// Example token for username `user` and password `pass`:
 ///   - Raw: `\0user\0pass`
@@ -61,15 +61,15 @@ impl narwhal_modulator::Modulator for PlainAuthenticator {
   /// Authenticates a client using the PLAIN mechanism.
   ///
   /// The `token` parameter must be a base64-encoded string of the form `\0username\0password`.
-  /// If the username and password match the hardcoded values, authentication succeeds and the username is returned.
-  /// Otherwise, authentication fails.
+  /// Any non-empty username is accepted; the password must match the hardcoded value.
+  /// On success, the client-supplied username is returned.
   ///
   /// # Arguments
   /// * `token` - A base64-encoded PLAIN authentication token.
   ///
   /// # Returns
-  /// * `AuthResponse` with `AuthResult::Success` containing the username if credentials are valid.
-  /// * `AuthResponse` with `AuthResult::Failure` if credentials are invalid or the token is malformed.
+  /// * `AuthResponse` with `AuthResult::Success` containing the username if the password is valid.
+  /// * `AuthResponse` with `AuthResult::Failure` if the password is invalid or the token is malformed.
   async fn authenticate(&self, request: AuthRequest) -> anyhow::Result<AuthResponse> {
     // Decode base64 token
     let decoded = match BASE64_STANDARD.decode(request.token.as_ref()) {
@@ -89,10 +89,10 @@ impl narwhal_modulator::Modulator for PlainAuthenticator {
 
     match (username, password) {
       (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => {
-        if u == USERNAME && p == PASSWORD {
+        if p == PASSWORD {
           Ok(AuthResponse { result: AuthResult::Success { username: StringAtom::from(u) } })
         } else {
-          tracing::warn!("authentication failed: invalid username or password");
+          tracing::warn!("authentication failed: invalid password");
           Ok(AuthResponse { result: AuthResult::Failure })
         }
       },

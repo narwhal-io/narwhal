@@ -162,7 +162,7 @@ cargo build --bin narwhal-bench --release
   --producers 1 \
   --consumers 1 \
   --duration 1m \
-  --max-payload-size 256
+  --payload-size 256
 ```
 
 The benchmark tool simulates multiple producer and consumer clients connecting to a Narwhal server and exchanging messages. It reports metrics such as:
@@ -170,6 +170,22 @@ The benchmark tool simulates multiple producer and consumer clients connecting t
 - Latency percentiles (p50, p90, p99)
 - Connection success rates
 - Total messages sent and received
+
+#### Benchmarking persistent channels
+
+Pass `--persist` to make the bench enable persistence on its channel before broadcasting. Every broadcast then writes to the channel's append-only message log and is acknowledged only after the log is flushed, so steady-state throughput becomes bounded by single-flush latency rather than the network/dispatch path.
+
+```bash
+./target/release/narwhal-bench \
+  --server 127.0.0.1:22622 \
+  --producers 1 \
+  --consumers 1 \
+  --duration 1m \
+  --payload-size 8192 \
+  --persist
+```
+
+Inspect the `narwhal_message_log_flush_duration_seconds` histogram on the server's `/metrics` endpoint to see the dominant cost.
 
 ### Running with Debug Tracing
 

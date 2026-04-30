@@ -1,0 +1,45 @@
+# Configuration for benchmarking Narwhal's C2S performance with an S2M modulator
+# attached over a Unix domain socket. Mirrors `c2s-benchmark.toml` but routes auth
+# through a modulator (e.g. the `plain-authenticator` example).
+#
+# The companion modulator config is `s2m-minimal-unix.toml`, which makes the
+# modulator listen on `/tmp/narwhal-s2m-server.sock`.
+
+[c2s-server.limits]
+# Maximum message size in bytes (32KB).
+max_message_size = 32768
+
+# Maximum payload size in bytes (128KB).
+max_payload_size = 131072
+
+# Payload pool memory budget in bytes (4GB).
+payload_pool_memory_budget = 4294967296
+
+# Maximum number of clients allowed per channel.
+max_clients_per_channel = 1000
+
+# Maximum number of inflight requests per client.
+max_inflight_requests = 100
+
+# When running benchmarks locally, set the outbound message queue size to a high value
+# to prevent disconnects due to outbound queue overflow.
+outbound_message_queue_size = 262144
+
+# Disable rate limiting completely to prevent artificial throughput caps.
+rate_limit = 0
+
+# Modulator configuration.
+[modulator]
+type = "s2m"
+
+# S2M client configuration.
+#
+# The C2S server connects out to a modulator listening on this Unix socket
+# (e.g. `plain-authenticator` started with `s2m-minimal-unix.toml`).
+[modulator.s2m-client]
+network = "unix"
+socket_path = "/tmp/narwhal-s2m-server.sock"
+
+# NOTE: `[modulator.m2s-server.listener]` is intentionally omitted. It is only
+# needed if the modulator implements `ReceivePrivatePayload`, which the
+# `plain-authenticator` example does not.

@@ -11,8 +11,10 @@ use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt, select};
 
 use async_lock::Mutex;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use narwhal_client::compio::c2s::C2sClient;
-use narwhal_client::{AuthMethod, C2sConfig};
+use narwhal_client::{AuthMethod, Authenticator, AuthenticatorFactory, C2sConfig};
 use narwhal_protocol::Nid;
 use narwhal_protocol::{AclAction, AclType, QoS};
 use narwhal_util::pool::Pool;
@@ -54,6 +56,12 @@ struct Cli {
   /// Enable message persistence on the benchmark channels
   #[arg(long, default_value_t = false)]
   persist: bool,
+
+  /// PLAIN auth password. When set, clients authenticate via the AUTH command using their
+  /// generated bench username and this password (suitable for the `plain-authenticator`
+  /// example modulator). When unset, clients use the IDENTIFY command (no modulator).
+  #[arg(long)]
+  auth_password: Option<String>,
 }
 
 /// Parse duration from string (supports: 30s, 5m, 1h)
@@ -85,6 +93,7 @@ fn main() {
   info!("channel(s): {}", cli.channels);
   info!("duration: {:?}", cli.duration);
   info!("persist: {}", cli.persist);
+  info!("auth: {}", if cli.auth_password.is_some() { "PLAIN" } else { "IDENTIFY" });
 
   // Initialize compio runtime
   compio::runtime::RuntimeBuilder::new().build().unwrap().block_on(async {
@@ -318,17 +327,63 @@ async fn create_and_join_channel(
   Ok(channel)
 }
 
+/// Single-step PLAIN authenticator. Emits a base64-encoded `\0username\0password` token.
+struct PlainAuthenticator {
+  username: String,
+  password: String,
+}
+
+#[async_trait::async_trait]
+impl Authenticator for PlainAuthenticator {
+  async fn start(&mut self) -> anyhow::Result<String> {
+    let mut token = Vec::with_capacity(self.username.len() + self.password.len() + 2);
+    token.push(0);
+    token.extend_from_slice(self.username.as_bytes());
+    token.push(0);
+    token.extend_from_slice(self.password.as_bytes());
+    Ok(BASE64_STANDARD.encode(token))
+  }
+
+  async fn next(&mut self, _challenge: String) -> anyhow::Result<String> {
+    anyhow::bail!("PLAIN is single-step; unexpected challenge from server")
+  }
+}
+
+struct PlainAuthenticatorFactory {
+  username: String,
+  password: String,
+}
+
+impl AuthenticatorFactory for PlainAuthenticatorFactory {
+  fn create(&self) -> Box<dyn Authenticator> {
+    Box::new(PlainAuthenticator { username: self.username.clone(), password: self.password.clone() })
+  }
+}
+
 /// Creates multiple clients with the given configuration.
 ///
 /// Returns a tuple of (clients, successful_count, failed_count).
-fn create_clients(config: &C2sConfig, count: usize, client_type: &str) -> (Vec<C2sClient>, usize, usize) {
+fn create_clients(
+  config: &C2sConfig,
+  count: usize,
+  client_type: &str,
+  auth_password: Option<&str>,
+) -> (Vec<C2sClient>, usize, usize) {
   let mut clients = Vec::with_capacity(count);
   let mut successful = 0;
   let mut failed = 0;
 
   for i in 0..count {
     let username = format!("bench_{}_{}", client_type, i);
-    let auth_method = AuthMethod::Identify { username: username.as_str().into() };
+    let auth_method = match auth_password {
+      Some(password) => AuthMethod::Auth {
+        authenticator_factory: Arc::new(PlainAuthenticatorFactory {
+          username: username.clone(),
+          password: password.to_string(),
+        }),
+      },
+      None => AuthMethod::Identify { username: username.as_str().into() },
+    };
 
     match C2sClient::new_with_insecure_tls(config.clone(), auth_method) {
       Ok(client) => {
@@ -500,12 +555,12 @@ async fn perform_benchmark(cli: &Cli, metrics: &mut BenchmarkMetrics) -> Result<
   // Create producers
   info!("creating {} producer client(s)...", cli.producers);
   let (producer_clients, producer_successful, producer_failed) =
-    create_clients(&client_config, cli.producers, "producer");
+    create_clients(&client_config, cli.producers, "producer", cli.auth_password.as_deref());
 
   // Create consumers
   info!("creating {} consumer client(s)...", cli.consumers);
   let (consumer_clients, consumer_successful, consumer_failed) =
-    create_clients(&client_config, cli.consumers, "consumer");
+    create_clients(&client_config, cli.consumers, "consumer", cli.auth_password.as_deref());
 
   // Combine metrics from producers and consumers
   let successful = producer_successful + consumer_successful;
