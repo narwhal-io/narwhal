@@ -261,6 +261,7 @@ impl Default for ServerConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Limits {
   /// The maximum number of connections to accept.
   pub max_connections: u32,
