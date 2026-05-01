@@ -26,5 +26,6 @@ Whenever you modify, create, or delete Rust (`.rs`) files, you MUST follow this 
 4. **Completion:** Do not report that you are finished until `cargo fmt` has been run and `cargo clippy` returns a clean, zero-exit-code run with no warnings.
 
 ## 4. Comment Style Rule
-- No em dashes (—) in comments.
-- No ellipses (...) in comments.
+Apply this rule only to comment text that you newly add or modify as part of the current change.
+  - Do not use em dashes (—).
+  - Do not use ellipses, whether written as `...` or `…`.
